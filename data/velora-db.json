@@ -21,7 +21,7 @@
       "name": "Social Media",
       "slug": "social-media",
       "description": "Social media design templates",
-      "image": "",
+      "image": "/src/assets/images/velora_social_studio_clean_1790691323998.jpg",
       "createdAt": "2026-10-31T19:52:26.322612+00:00"
     },
     {
@@ -29,7 +29,7 @@
       "name": "Printables",
       "slug": "printables",
       "description": "Printable digital designs",
-      "image": "",
+      "image": "/src/assets/images/velora_printables_studio_clean_1790691336397.jpg",
       "createdAt": "2026-10-31T19:52:26.322612+00:00"
     },
     {
@@ -37,7 +37,7 @@
       "name": "Logos",
       "slug": "logos",
       "description": "Logo and brand identity designs",
-      "image": "",
+      "image": "/src/assets/images/velora_logos_studio_clean_1790691349764.jpg",
       "createdAt": "2026-10-31T19:52:26.322612+00:00"
     }
   ],
@@ -56,5 +56,19 @@
   },
   "contactInquiries": [],
   "newsletterEmails": [],
-  "adminPasswordHash": "pbkdf2:10000:d32b3747b7c9ff0b218ed72a8a897f6d:e77cc2be277d5753992696e8fe03cde9eaea2360f0f5f1b68f1b8c6bd283c0a6"
+  "adminPasswordHash": "pbkdf2:10000:d32b3747b7c9ff0b218ed72a8a897f6d:e77cc2be277d5753992696e8fe03cde9eaea2360f0f5f1b68f1b8c6bd283c0a6",
+  "deletedCategoryIds": [
+    "cat_825fb6eb",
+    "temporary-verification-category",
+    "cat_d18321c6",
+    "protected-category"
+  ],
+  "deletedProductIds": [
+    "prod_50ac683bffe0",
+    "sample-digital-asset-for-deletion-test",
+    "prod_25f61ae1ec8a",
+    "protected-suite-design"
+  ],
+  "deletedOrderIds": [],
+  "deletedCouponIds": []
 }

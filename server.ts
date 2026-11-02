@@ -4,7 +4,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
-import { ensureDbLoaded, loadDb, saveDb, isDatabaseConnected, getSupabaseServerClient } from './src/server/db';
+import { ensureDbLoaded, loadDb, saveDb, isDatabaseConnected, getSupabaseServerClient, getCategoryFallbackImage } from './src/server/db';
 import { storageService, isObjectStorageConfigured } from './src/server/storage';
 
 dotenv.config();
@@ -126,11 +126,13 @@ app.use((req, res, next) => {
 
   // Handle static image routes
   const cleanUrl = req.url.split('?')[0];
-  if (
+  const isImageRequest =
     cleanUrl.startsWith('/assets/images/') ||
     cleanUrl.startsWith('/src/assets/images/') ||
-    cleanUrl.startsWith('/images/')
-  ) {
+    cleanUrl.startsWith('/images/') ||
+    /\.(jpg|jpeg|png|webp|svg|gif|ico)$/i.test(cleanUrl);
+
+  if (isImageRequest) {
     const filename = path.basename(cleanUrl);
     for (const dir of candidateImageDirs) {
       const candidatePath = path.join(dir, filename);
@@ -139,6 +141,11 @@ app.use((req, res, next) => {
         return res.sendFile(candidatePath);
       }
     }
+    // Return SVG fallback placeholder with HTTP 404 so browser image decoding never encounters HTML
+    res.status(404).setHeader('Content-Type', 'image/svg+xml').send(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="100%" height="100%" fill="#F5ECE6"/><text x="50%" y="48%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-weight="600" font-size="16" fill="#3D0F18">DESIGNHUB PK</text><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#7A545B">Digital Design Asset</text></svg>`
+    );
+    return;
   }
   next();
 });
@@ -2557,6 +2564,13 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
     updatedAt: now,
   };
 
+  // If newly created product has an id/slug previously tombstoned, clear it
+  if (Array.isArray(db.deletedProductIds)) {
+    db.deletedProductIds = db.deletedProductIds.filter(
+      (pId) => pId !== product.id && pId !== product.slug
+    );
+  }
+
   db.products.unshift(product);
   await saveDb(db);
   res.status(201).json({ product: sanitizeProductForPublic(product) });
@@ -2667,30 +2681,64 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
   if (seoDescription !== undefined) product.seoDescription = seoDescription.trim();
 
   product.updatedAt = new Date().toISOString();
+
+  // Clear from tombstone if re-activated
+  if (Array.isArray(db.deletedProductIds)) {
+    db.deletedProductIds = db.deletedProductIds.filter(
+      (pId) => pId !== product.id && pId !== product.slug
+    );
+  }
+
   await saveDb(db);
   res.json({ product: sanitizeProductForPublic(product) });
 });
 
 // Admin: Delete Product
 app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const { id } = req.params;
-  const idx = db.products.findIndex((p) => p.id === id);
-  if (idx === -1) {
-    res.status(404).json({ error: 'Product not found.' });
-    return;
-  }
-  db.products.splice(idx, 1);
-  await saveDb(db);
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    const { id } = req.params;
+    const idx = db.products.findIndex((p) => p.id === id || p.slug === id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Product not found.' });
+      return;
+    }
+    const product = db.products[idx];
 
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from('products').delete().eq('id', id);
-    } catch {}
-  }
+    // 1. Register permanent tombstone so product never resurrects
+    if (!Array.isArray(db.deletedProductIds)) {
+      db.deletedProductIds = [];
+    }
+    if (!db.deletedProductIds.includes(product.id)) {
+      db.deletedProductIds.push(product.id);
+    }
+    if (product.slug && !db.deletedProductIds.includes(product.slug)) {
+      db.deletedProductIds.push(product.slug);
+    }
 
-  res.json({ deleted: true });
+    // 2. Remove from active product list
+    db.products.splice(idx, 1);
+    await saveDb(db);
+
+    // 3. Attempt remote Supabase deletion
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from('products').delete().eq('id', product.id);
+        if (product.slug) {
+          await client.from('products').delete().eq('slug', product.slug);
+        }
+      } catch (err) {
+        console.warn('[DesignHub PK Product Delete] Notice:', err);
+      }
+    }
+
+    console.info(`[DesignHub PK Product] Product "${product.title}" (${product.id}) permanently deleted.`);
+    res.json({ success: true, deleted: true, productId: product.id });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to delete product: ${err?.message || 'Unknown error'}` });
+  }
 });
 
 // Admin: Categories CRUD
@@ -2716,9 +2764,17 @@ app.post('/api/admin/categories', requireAdmin, async (req, res) => {
     name: name.trim(),
     slug,
     description: description?.trim() || '',
-    image: image?.trim() || '/src/assets/images/velora_cat_social_media_1790670021007.jpg',
+    image: image?.trim() || getCategoryFallbackImage(slug, name.trim()),
     createdAt: new Date().toISOString(),
   };
+
+  // Remove from deleted tombstone so admin can freely recreate this category
+  if (Array.isArray(db.deletedCategoryIds)) {
+    db.deletedCategoryIds = db.deletedCategoryIds.filter(
+      (dId) => dId !== newCat.id && dId !== newCat.slug && dId !== slug
+    );
+  }
+
   db.categories.push(newCat);
   await saveDb(db);
   res.status(201).json({ category: newCat });
@@ -2741,7 +2797,19 @@ app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
       .replace(/^-|-$/g, '');
   }
   if (description !== undefined) cat.description = description.trim();
-  if (image?.trim()) cat.image = image.trim();
+  if (image?.trim()) {
+    cat.image = image.trim();
+  } else if (!cat.image) {
+    cat.image = getCategoryFallbackImage(cat.slug, cat.name);
+  }
+
+  // Clear from tombstone
+  if (Array.isArray(db.deletedCategoryIds)) {
+    db.deletedCategoryIds = db.deletedCategoryIds.filter(
+      (dId) => dId !== cat.id && dId !== cat.slug
+    );
+  }
+
   await saveDb(db);
   res.json({ category: cat });
 });
@@ -2752,7 +2820,7 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
     const db = loadDb();
     const { id } = req.params;
 
-    const cat = db.categories.find((c) => c.id === id);
+    const cat = db.categories.find((c) => c.id === id || c.slug === id);
     if (!cat) {
       res.status(404).json({ error: 'Category not found.' });
       return;
@@ -2779,28 +2847,41 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
       return;
     }
 
-    // 1. Authoritative Supabase deletion
-    const client = getSupabaseServerClient();
-    if (client) {
-      const { error: supaErr } = await client.from('categories').delete().eq('id', id);
-      if (supaErr) {
-        console.error('[DesignHub PK Category Deletion Error]:', supaErr);
-        res.status(500).json({
-          error: `Failed to delete category from Supabase database: ${supaErr.message}`,
-        });
-        return;
-      }
+    // 1. Permanently register tombstone so Supabase sync, seed scripts, or restart never resurrects it
+    if (!Array.isArray(db.deletedCategoryIds)) {
+      db.deletedCategoryIds = [];
+    }
+    if (!db.deletedCategoryIds.includes(cat.id)) {
+      db.deletedCategoryIds.push(cat.id);
+    }
+    if (cat.slug && !db.deletedCategoryIds.includes(cat.slug)) {
+      db.deletedCategoryIds.push(cat.slug);
     }
 
-    // 2. Remove from local in-memory database and persist to local storage
-    const idx = db.categories.findIndex((c) => c.id === id);
+    // 2. Remove from local in-memory database
+    const idx = db.categories.findIndex((c) => c.id === cat.id);
     if (idx !== -1) {
       db.categories.splice(idx, 1);
     }
+
+    // 3. Persist immediately to database file
     await saveDb(db);
 
-    console.info(`[DesignHub PK Category] Category "${cat.name}" (${id}) permanently deleted.`);
-    res.json({ success: true, deleted: true, categoryId: id });
+    // 4. Authoritative Supabase deletion attempt
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from('categories').delete().eq('id', cat.id);
+        if (cat.slug) {
+          await client.from('categories').delete().eq('slug', cat.slug);
+        }
+      } catch (supaErr) {
+        console.warn('[DesignHub PK Category] Supabase delete notice (tombstone will enforce deletion):', supaErr);
+      }
+    }
+
+    console.info(`[DesignHub PK Category] Category "${cat.name}" (${cat.id}) permanently deleted.`);
+    res.json({ success: true, deleted: true, categoryId: cat.id });
   } catch (err: any) {
     console.error('[DesignHub PK Category Delete Exception]:', err);
     res.status(500).json({ error: `Internal error deleting category: ${err?.message || 'Unknown error'}` });
@@ -2867,26 +2948,60 @@ app.put('/api/admin/orders/:orderId/status', requireAdmin, async (req, res) => {
 
 // Admin: Delete a specific Transaction / Order
 app.delete('/api/admin/orders/:orderId', requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const { orderId } = req.params;
-  const idx = db.orders.findIndex((o) => o.orderId === orderId);
-  if (idx === -1) {
-    res.status(404).json({ error: 'Transaction not found.' });
-    return;
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    const { orderId } = req.params;
+    const idx = db.orders.findIndex((o) => o.orderId === orderId);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Transaction not found.' });
+      return;
+    }
+
+    if (!Array.isArray(db.deletedOrderIds)) {
+      db.deletedOrderIds = [];
+    }
+    if (!db.deletedOrderIds.includes(orderId)) {
+      db.deletedOrderIds.push(orderId);
+    }
+
+    db.orders.splice(idx, 1);
+    db.downloads = db.downloads.filter((d) => d.orderId !== orderId);
+    await saveDb(db);
+
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from('orders').delete().eq('order_id', orderId);
+      } catch {}
+    }
+
+    res.json({ success: true, deleted: true, orderId });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to delete order: ${err?.message || 'Unknown error'}` });
   }
-  db.orders.splice(idx, 1);
-  db.downloads = db.downloads.filter((d) => d.orderId !== orderId);
-  await saveDb(db);
-  res.json({ deleted: true });
 });
 
 // Admin: Clear All Transactions & Orders
 app.delete('/api/admin/orders', requireAdmin, async (_req, res) => {
-  const db = loadDb();
-  db.orders = [];
-  db.downloads = [];
-  await saveDb(db);
-  res.json({ cleared: true });
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    if (!Array.isArray(db.deletedOrderIds)) {
+      db.deletedOrderIds = [];
+    }
+    db.orders.forEach((o) => {
+      if (!db.deletedOrderIds!.includes(o.orderId)) {
+        db.deletedOrderIds!.push(o.orderId);
+      }
+    });
+    db.orders = [];
+    db.downloads = [];
+    await saveDb(db);
+    res.json({ success: true, cleared: true });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to clear orders: ${err?.message || 'Unknown error'}` });
+  }
 });
 
 // Admin: Coupons CRUD
@@ -2907,9 +3022,11 @@ app.post('/api/admin/coupons', requireAdmin, async (req, res) => {
     return;
   }
 
+  const normalizedCode = code.trim().toUpperCase();
+
   const coupon: StoredCoupon = {
     id: `cpn_${crypto.randomBytes(4).toString('hex')}`,
-    code: code.trim().toUpperCase(),
+    code: normalizedCode,
     type: type === 'fixed' ? 'fixed' : 'percentage',
     value: Number(value),
     expiresAt: expiresAt || undefined,
@@ -2921,21 +3038,54 @@ app.post('/api/admin/coupons', requireAdmin, async (req, res) => {
     createdAt: new Date().toISOString(),
   };
 
+  // Clear from tombstone if re-created
+  if (Array.isArray(db.deletedCouponIds)) {
+    db.deletedCouponIds = db.deletedCouponIds.filter(
+      (cId) => cId !== coupon.id && cId !== coupon.code
+    );
+  }
+
   db.coupons.unshift(coupon);
   await saveDb(db);
   res.status(201).json({ coupon });
 });
 
 app.delete('/api/admin/coupons/:id', requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const idx = db.coupons.findIndex((c) => c.id === req.params.id);
-  if (idx === -1) {
-    res.status(404).json({ error: 'Coupon not found.' });
-    return;
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    const { id } = req.params;
+    const idx = db.coupons.findIndex((c) => c.id === id || c.code === id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Coupon not found.' });
+      return;
+    }
+    const coupon = db.coupons[idx];
+
+    if (!Array.isArray(db.deletedCouponIds)) {
+      db.deletedCouponIds = [];
+    }
+    if (!db.deletedCouponIds.includes(coupon.id)) {
+      db.deletedCouponIds.push(coupon.id);
+    }
+    if (coupon.code && !db.deletedCouponIds.includes(coupon.code)) {
+      db.deletedCouponIds.push(coupon.code);
+    }
+
+    db.coupons.splice(idx, 1);
+    await saveDb(db);
+
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from('coupons').delete().eq('id', coupon.id);
+      } catch {}
+    }
+
+    res.json({ success: true, deleted: true, couponId: coupon.id });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to delete coupon: ${err?.message || 'Unknown error'}` });
   }
-  db.coupons.splice(idx, 1);
-  await saveDb(db);
-  res.json({ deleted: true });
 });
 
 // Admin: Homepage Configuration

@@ -144,6 +144,10 @@ export interface DatabaseSchema {
   downloads: StoredDownload[];
   customers: StoredCustomer[];
   coupons: StoredCoupon[];
+  deletedCategoryIds?: string[];
+  deletedProductIds?: string[];
+  deletedOrderIds?: string[];
+  deletedCouponIds?: string[];
   newsletterEmails: Array<{ email: string; subscribedAt: string }>;
   contactInquiries: Array<{
     id: string;
@@ -366,6 +370,21 @@ function cleanTestData(data: DatabaseSchema): boolean {
   return changed;
 }
 
+export function getCategoryFallbackImage(slug?: string, name?: string): string {
+  const s = (slug || '').toLowerCase();
+  const n = (name || '').toLowerCase();
+  if (s.includes('social') || n.includes('social')) {
+    return '/src/assets/images/velora_social_studio_clean_1790691323998.jpg';
+  }
+  if (s.includes('print') || n.includes('print')) {
+    return '/src/assets/images/velora_printables_studio_clean_1790691336397.jpg';
+  }
+  if (s.includes('logo') || n.includes('logo')) {
+    return '/src/assets/images/velora_logos_studio_clean_1790691349764.jpg';
+  }
+  return '/src/assets/images/velora_luxury_hero_showcase_1790742562741.jpg';
+}
+
 function normalizeSchemaArrays(schema: DatabaseSchema) {
   if (!Array.isArray(schema.products)) schema.products = [];
   if (!Array.isArray(schema.categories)) schema.categories = [];
@@ -373,6 +392,10 @@ function normalizeSchemaArrays(schema: DatabaseSchema) {
   if (!Array.isArray(schema.downloads)) schema.downloads = [];
   if (!Array.isArray(schema.customers)) schema.customers = [];
   if (!Array.isArray(schema.coupons)) schema.coupons = [];
+  if (!Array.isArray(schema.deletedCategoryIds)) schema.deletedCategoryIds = [];
+  if (!Array.isArray(schema.deletedProductIds)) schema.deletedProductIds = [];
+  if (!Array.isArray(schema.deletedOrderIds)) schema.deletedOrderIds = [];
+  if (!Array.isArray(schema.deletedCouponIds)) schema.deletedCouponIds = [];
   if (!Array.isArray(schema.newsletterEmails)) schema.newsletterEmails = [];
   if (!Array.isArray(schema.contactInquiries)) schema.contactInquiries = [];
 
@@ -553,50 +576,56 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
       const catErr = catRes?.error;
 
       if (!prodErr && Array.isArray(supaProducts)) {
+        const deletedProdSet = new Set(localDb.deletedProductIds || []);
         // Map Supabase snake_case rows to StoredProduct format
-        const mappedProducts: StoredProduct[] = supaProducts.map((row: any) => ({
-          id: row.id,
-          title: row.title,
-          slug: row.slug,
-          category: row.category,
-          description: row.description || '',
-          previewImages: row.preview_images || [],
-          jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
-          jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
-          jpgPrice: Number(row.jpg_price || 0),
-          oldPrice: row.old_price ? Number(row.old_price) : null,
-          hasPsd: Boolean(row.has_psd),
-          psdStorageKey: row.psd_storage_key || undefined,
-          psdFileName: row.psd_file_name || undefined,
-          psdUpgradePrice: row.psd_upgrade_price ? Number(row.psd_upgrade_price) : null,
-          dimensions: row.dimensions || '',
-          compatibility: row.compatibility || '',
-          usageRights: row.usage_rights || '',
-          whatsIncluded: row.whats_included || [],
-          tags: row.tags || [],
-          featured: Boolean(row.featured),
-          bestseller: Boolean(row.bestseller),
-          new: Boolean(row.is_new),
-          limited: Boolean(row.limited),
-          seoTitle: row.seo_title,
-          seoDescription: row.seo_description,
-          isPublished: row.is_published !== false,
-          createdAt: row.created_at || new Date().toISOString(),
-          updatedAt: row.updated_at || new Date().toISOString(),
-        }));
+        const mappedProducts: StoredProduct[] = supaProducts
+          .map((row: any) => ({
+            id: row.id,
+            title: row.title,
+            slug: row.slug,
+            category: row.category,
+            description: row.description || '',
+            previewImages: row.preview_images || [],
+            jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
+            jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
+            jpgPrice: Number(row.jpg_price || 0),
+            oldPrice: row.old_price ? Number(row.old_price) : null,
+            hasPsd: Boolean(row.has_psd),
+            psdStorageKey: row.psd_storage_key || undefined,
+            psdFileName: row.psd_file_name || undefined,
+            psdUpgradePrice: row.psd_upgrade_price ? Number(row.psd_upgrade_price) : null,
+            dimensions: row.dimensions || '',
+            compatibility: row.compatibility || '',
+            usageRights: row.usage_rights || '',
+            whatsIncluded: row.whats_included || [],
+            tags: row.tags || [],
+            featured: Boolean(row.featured),
+            bestseller: Boolean(row.bestseller),
+            new: Boolean(row.is_new),
+            limited: Boolean(row.limited),
+            seoTitle: row.seo_title,
+            seoDescription: row.seo_description,
+            isPublished: row.is_published !== false,
+            createdAt: row.created_at || new Date().toISOString(),
+            updatedAt: row.updated_at || new Date().toISOString(),
+          }))
+          .filter((p: StoredProduct) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug));
         localDb.products = mappedProducts;
       }
 
       if (!catErr && Array.isArray(supaCategories)) {
+        const deletedCatSet = new Set(localDb.deletedCategoryIds || []);
         // Map Supabase categories to StoredCategory format authoritatively
-        const mappedCategories = supaCategories.map((row: any) => ({
-          id: row.id,
-          name: row.name,
-          slug: row.slug,
-          description: row.description || '',
-          image: row.image || '',
-          createdAt: row.created_at || new Date().toISOString(),
-        }));
+        const mappedCategories = supaCategories
+          .map((row: any) => ({
+            id: row.id,
+            name: row.name,
+            slug: row.slug,
+            description: row.description || '',
+            image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
+            createdAt: row.created_at || new Date().toISOString(),
+          }))
+          .filter((c: any) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug));
         localDb.categories = mappedCategories;
       }
     } catch {
@@ -656,10 +685,15 @@ export async function saveDb(data: DatabaseSchema): Promise<DatabaseSchema> {
       const client = getSupabaseServerClient();
       if (client) {
         try {
-          // Sync categories
-          if (data.categories && data.categories.length > 0) {
+          // Sync categories (excluding any tombstoned deleted categories)
+          const deletedCatSet = new Set(data.deletedCategoryIds || []);
+          const activeCategories = (data.categories || []).filter(
+            (c) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug)
+          );
+
+          if (activeCategories.length > 0) {
             await client.from('categories').upsert(
-              data.categories.map((c) => ({
+              activeCategories.map((c) => ({
                 id: c.id,
                 name: c.name,
                 slug: c.slug,
@@ -671,10 +705,15 @@ export async function saveDb(data: DatabaseSchema): Promise<DatabaseSchema> {
             );
           }
 
-          // Sync products
-          if (data.products && data.products.length > 0) {
+          // Sync products (excluding any tombstoned deleted products)
+          const deletedProdSet = new Set(data.deletedProductIds || []);
+          const activeProducts = (data.products || []).filter(
+            (p) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug)
+          );
+
+          if (activeProducts.length > 0) {
             await client.from('products').upsert(
-              data.products.map((p) => ({
+              activeProducts.map((p) => ({
                 id: p.id,
                 title: p.title,
                 slug: p.slug,

@@ -159,6 +159,20 @@ function cleanTestData(data) {
   }
   return changed;
 }
+function getCategoryFallbackImage(slug, name) {
+  const s = (slug || "").toLowerCase();
+  const n = (name || "").toLowerCase();
+  if (s.includes("social") || n.includes("social")) {
+    return "/src/assets/images/velora_social_studio_clean_1790691323998.jpg";
+  }
+  if (s.includes("print") || n.includes("print")) {
+    return "/src/assets/images/velora_printables_studio_clean_1790691336397.jpg";
+  }
+  if (s.includes("logo") || n.includes("logo")) {
+    return "/src/assets/images/velora_logos_studio_clean_1790691349764.jpg";
+  }
+  return "/src/assets/images/velora_luxury_hero_showcase_1790742562741.jpg";
+}
 function normalizeSchemaArrays(schema) {
   if (!Array.isArray(schema.products)) schema.products = [];
   if (!Array.isArray(schema.categories)) schema.categories = [];
@@ -166,6 +180,10 @@ function normalizeSchemaArrays(schema) {
   if (!Array.isArray(schema.downloads)) schema.downloads = [];
   if (!Array.isArray(schema.customers)) schema.customers = [];
   if (!Array.isArray(schema.coupons)) schema.coupons = [];
+  if (!Array.isArray(schema.deletedCategoryIds)) schema.deletedCategoryIds = [];
+  if (!Array.isArray(schema.deletedProductIds)) schema.deletedProductIds = [];
+  if (!Array.isArray(schema.deletedOrderIds)) schema.deletedOrderIds = [];
+  if (!Array.isArray(schema.deletedCouponIds)) schema.deletedCouponIds = [];
   if (!Array.isArray(schema.newsletterEmails)) schema.newsletterEmails = [];
   if (!Array.isArray(schema.contactInquiries)) schema.contactInquiries = [];
   schema.products = schema.products.map((p) => {
@@ -288,6 +306,7 @@ async function ensureDbLoaded() {
       const supaCategories = catRes?.data;
       const catErr = catRes?.error;
       if (!prodErr && Array.isArray(supaProducts)) {
+        const deletedProdSet = new Set(localDb.deletedProductIds || []);
         const mappedProducts = supaProducts.map((row) => ({
           id: row.id,
           title: row.title,
@@ -317,18 +336,19 @@ async function ensureDbLoaded() {
           isPublished: row.is_published !== false,
           createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString(),
           updatedAt: row.updated_at || (/* @__PURE__ */ new Date()).toISOString()
-        }));
+        })).filter((p) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug));
         localDb.products = mappedProducts;
       }
       if (!catErr && Array.isArray(supaCategories)) {
+        const deletedCatSet = new Set(localDb.deletedCategoryIds || []);
         const mappedCategories = supaCategories.map((row) => ({
           id: row.id,
           name: row.name,
           slug: row.slug,
           description: row.description || "",
-          image: row.image || "",
+          image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
           createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString()
-        }));
+        })).filter((c) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug));
         localDb.categories = mappedCategories;
       }
     } catch {
@@ -370,9 +390,13 @@ async function saveDb(data) {
     const client = getSupabaseServerClient();
     if (client) {
       try {
-        if (data.categories && data.categories.length > 0) {
+        const deletedCatSet = new Set(data.deletedCategoryIds || []);
+        const activeCategories = (data.categories || []).filter(
+          (c) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug)
+        );
+        if (activeCategories.length > 0) {
           await client.from("categories").upsert(
-            data.categories.map((c) => ({
+            activeCategories.map((c) => ({
               id: c.id,
               name: c.name,
               slug: c.slug,
@@ -383,9 +407,13 @@ async function saveDb(data) {
             { onConflict: "id" }
           );
         }
-        if (data.products && data.products.length > 0) {
+        const deletedProdSet = new Set(data.deletedProductIds || []);
+        const activeProducts = (data.products || []).filter(
+          (p) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug)
+        );
+        if (activeProducts.length > 0) {
           await client.from("products").upsert(
-            data.products.map((p) => ({
+            activeProducts.map((p) => ({
               id: p.id,
               title: p.title,
               slug: p.slug,
@@ -782,7 +810,8 @@ app.use((req, res, next) => {
     return next();
   }
   const cleanUrl = req.url.split("?")[0];
-  if (cleanUrl.startsWith("/assets/images/") || cleanUrl.startsWith("/src/assets/images/") || cleanUrl.startsWith("/images/")) {
+  const isImageRequest = cleanUrl.startsWith("/assets/images/") || cleanUrl.startsWith("/src/assets/images/") || cleanUrl.startsWith("/images/") || /\.(jpg|jpeg|png|webp|svg|gif|ico)$/i.test(cleanUrl);
+  if (isImageRequest) {
     const filename = path4.basename(cleanUrl);
     for (const dir of candidateImageDirs) {
       const candidatePath = path4.join(dir, filename);
@@ -791,6 +820,10 @@ app.use((req, res, next) => {
         return res.sendFile(candidatePath);
       }
     }
+    res.status(404).setHeader("Content-Type", "image/svg+xml").send(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="100%" height="100%" fill="#F5ECE6"/><text x="50%" y="48%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-weight="600" font-size="16" fill="#3D0F18">DESIGNHUB PK</text><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#7A545B">Digital Design Asset</text></svg>`
+    );
+    return;
   }
   next();
 });
@@ -2352,6 +2385,11 @@ app.post("/api/admin/products", requireAdmin, async (req, res) => {
     createdAt: now,
     updatedAt: now
   };
+  if (Array.isArray(db.deletedProductIds)) {
+    db.deletedProductIds = db.deletedProductIds.filter(
+      (pId) => pId !== product.id && pId !== product.slug
+    );
+  }
   db.products.unshift(product);
   await saveDb(db);
   res.status(201).json({ product: sanitizeProductForPublic(product) });
@@ -2444,27 +2482,52 @@ app.put("/api/admin/products/:id", requireAdmin, async (req, res) => {
   if (seoTitle !== void 0) product.seoTitle = seoTitle.trim();
   if (seoDescription !== void 0) product.seoDescription = seoDescription.trim();
   product.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (Array.isArray(db.deletedProductIds)) {
+    db.deletedProductIds = db.deletedProductIds.filter(
+      (pId) => pId !== product.id && pId !== product.slug
+    );
+  }
   await saveDb(db);
   res.json({ product: sanitizeProductForPublic(product) });
 });
 app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const { id } = req.params;
-  const idx = db.products.findIndex((p) => p.id === id);
-  if (idx === -1) {
-    res.status(404).json({ error: "Product not found." });
-    return;
-  }
-  db.products.splice(idx, 1);
-  await saveDb(db);
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from("products").delete().eq("id", id);
-    } catch {
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    const { id } = req.params;
+    const idx = db.products.findIndex((p) => p.id === id || p.slug === id);
+    if (idx === -1) {
+      res.status(404).json({ error: "Product not found." });
+      return;
     }
+    const product = db.products[idx];
+    if (!Array.isArray(db.deletedProductIds)) {
+      db.deletedProductIds = [];
+    }
+    if (!db.deletedProductIds.includes(product.id)) {
+      db.deletedProductIds.push(product.id);
+    }
+    if (product.slug && !db.deletedProductIds.includes(product.slug)) {
+      db.deletedProductIds.push(product.slug);
+    }
+    db.products.splice(idx, 1);
+    await saveDb(db);
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from("products").delete().eq("id", product.id);
+        if (product.slug) {
+          await client.from("products").delete().eq("slug", product.slug);
+        }
+      } catch (err) {
+        console.warn("[DesignHub PK Product Delete] Notice:", err);
+      }
+    }
+    console.info(`[DesignHub PK Product] Product "${product.title}" (${product.id}) permanently deleted.`);
+    res.json({ success: true, deleted: true, productId: product.id });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to delete product: ${err?.message || "Unknown error"}` });
   }
-  res.json({ deleted: true });
 });
 app.post("/api/admin/categories", requireAdmin, async (req, res) => {
   const db = loadDb();
@@ -2479,9 +2542,14 @@ app.post("/api/admin/categories", requireAdmin, async (req, res) => {
     name: name.trim(),
     slug,
     description: description?.trim() || "",
-    image: image?.trim() || "/src/assets/images/velora_cat_social_media_1790670021007.jpg",
+    image: image?.trim() || getCategoryFallbackImage(slug, name.trim()),
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+  if (Array.isArray(db.deletedCategoryIds)) {
+    db.deletedCategoryIds = db.deletedCategoryIds.filter(
+      (dId) => dId !== newCat.id && dId !== newCat.slug && dId !== slug
+    );
+  }
   db.categories.push(newCat);
   await saveDb(db);
   res.status(201).json({ category: newCat });
@@ -2499,7 +2567,16 @@ app.put("/api/admin/categories/:id", requireAdmin, async (req, res) => {
     cat.slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   }
   if (description !== void 0) cat.description = description.trim();
-  if (image?.trim()) cat.image = image.trim();
+  if (image?.trim()) {
+    cat.image = image.trim();
+  } else if (!cat.image) {
+    cat.image = getCategoryFallbackImage(cat.slug, cat.name);
+  }
+  if (Array.isArray(db.deletedCategoryIds)) {
+    db.deletedCategoryIds = db.deletedCategoryIds.filter(
+      (dId) => dId !== cat.id && dId !== cat.slug
+    );
+  }
   await saveDb(db);
   res.json({ category: cat });
 });
@@ -2508,7 +2585,7 @@ app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
     await ensureDbLoaded();
     const db = loadDb();
     const { id } = req.params;
-    const cat = db.categories.find((c) => c.id === id);
+    const cat = db.categories.find((c) => c.id === id || c.slug === id);
     if (!cat) {
       res.status(404).json({ error: "Category not found." });
       return;
@@ -2525,24 +2602,33 @@ app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
       });
       return;
     }
-    const client = getSupabaseServerClient();
-    if (client) {
-      const { error: supaErr } = await client.from("categories").delete().eq("id", id);
-      if (supaErr) {
-        console.error("[DesignHub PK Category Deletion Error]:", supaErr);
-        res.status(500).json({
-          error: `Failed to delete category from Supabase database: ${supaErr.message}`
-        });
-        return;
-      }
+    if (!Array.isArray(db.deletedCategoryIds)) {
+      db.deletedCategoryIds = [];
     }
-    const idx = db.categories.findIndex((c) => c.id === id);
+    if (!db.deletedCategoryIds.includes(cat.id)) {
+      db.deletedCategoryIds.push(cat.id);
+    }
+    if (cat.slug && !db.deletedCategoryIds.includes(cat.slug)) {
+      db.deletedCategoryIds.push(cat.slug);
+    }
+    const idx = db.categories.findIndex((c) => c.id === cat.id);
     if (idx !== -1) {
       db.categories.splice(idx, 1);
     }
     await saveDb(db);
-    console.info(`[DesignHub PK Category] Category "${cat.name}" (${id}) permanently deleted.`);
-    res.json({ success: true, deleted: true, categoryId: id });
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from("categories").delete().eq("id", cat.id);
+        if (cat.slug) {
+          await client.from("categories").delete().eq("slug", cat.slug);
+        }
+      } catch (supaErr) {
+        console.warn("[DesignHub PK Category] Supabase delete notice (tombstone will enforce deletion):", supaErr);
+      }
+    }
+    console.info(`[DesignHub PK Category] Category "${cat.name}" (${cat.id}) permanently deleted.`);
+    res.json({ success: true, deleted: true, categoryId: cat.id });
   } catch (err) {
     console.error("[DesignHub PK Category Delete Exception]:", err);
     res.status(500).json({ error: `Internal error deleting category: ${err?.message || "Unknown error"}` });
@@ -2593,24 +2679,55 @@ app.put("/api/admin/orders/:orderId/status", requireAdmin, async (req, res) => {
   });
 });
 app.delete("/api/admin/orders/:orderId", requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const { orderId } = req.params;
-  const idx = db.orders.findIndex((o) => o.orderId === orderId);
-  if (idx === -1) {
-    res.status(404).json({ error: "Transaction not found." });
-    return;
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    const { orderId } = req.params;
+    const idx = db.orders.findIndex((o) => o.orderId === orderId);
+    if (idx === -1) {
+      res.status(404).json({ error: "Transaction not found." });
+      return;
+    }
+    if (!Array.isArray(db.deletedOrderIds)) {
+      db.deletedOrderIds = [];
+    }
+    if (!db.deletedOrderIds.includes(orderId)) {
+      db.deletedOrderIds.push(orderId);
+    }
+    db.orders.splice(idx, 1);
+    db.downloads = db.downloads.filter((d) => d.orderId !== orderId);
+    await saveDb(db);
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from("orders").delete().eq("order_id", orderId);
+      } catch {
+      }
+    }
+    res.json({ success: true, deleted: true, orderId });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to delete order: ${err?.message || "Unknown error"}` });
   }
-  db.orders.splice(idx, 1);
-  db.downloads = db.downloads.filter((d) => d.orderId !== orderId);
-  await saveDb(db);
-  res.json({ deleted: true });
 });
 app.delete("/api/admin/orders", requireAdmin, async (_req, res) => {
-  const db = loadDb();
-  db.orders = [];
-  db.downloads = [];
-  await saveDb(db);
-  res.json({ cleared: true });
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    if (!Array.isArray(db.deletedOrderIds)) {
+      db.deletedOrderIds = [];
+    }
+    db.orders.forEach((o) => {
+      if (!db.deletedOrderIds.includes(o.orderId)) {
+        db.deletedOrderIds.push(o.orderId);
+      }
+    });
+    db.orders = [];
+    db.downloads = [];
+    await saveDb(db);
+    res.json({ success: true, cleared: true });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to clear orders: ${err?.message || "Unknown error"}` });
+  }
 });
 app.post("/api/admin/coupons", requireAdmin, async (req, res) => {
   const db = loadDb();
@@ -2627,9 +2744,10 @@ app.post("/api/admin/coupons", requireAdmin, async (req, res) => {
     res.status(400).json({ error: "Coupon code and a positive discount value are required." });
     return;
   }
+  const normalizedCode = code.trim().toUpperCase();
   const coupon = {
     id: `cpn_${crypto2.randomBytes(4).toString("hex")}`,
-    code: code.trim().toUpperCase(),
+    code: normalizedCode,
     type: type === "fixed" ? "fixed" : "percentage",
     value: Number(value),
     expiresAt: expiresAt || void 0,
@@ -2640,20 +2758,48 @@ app.post("/api/admin/coupons", requireAdmin, async (req, res) => {
     active: true,
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+  if (Array.isArray(db.deletedCouponIds)) {
+    db.deletedCouponIds = db.deletedCouponIds.filter(
+      (cId) => cId !== coupon.id && cId !== coupon.code
+    );
+  }
   db.coupons.unshift(coupon);
   await saveDb(db);
   res.status(201).json({ coupon });
 });
 app.delete("/api/admin/coupons/:id", requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const idx = db.coupons.findIndex((c) => c.id === req.params.id);
-  if (idx === -1) {
-    res.status(404).json({ error: "Coupon not found." });
-    return;
+  try {
+    await ensureDbLoaded();
+    const db = loadDb();
+    const { id } = req.params;
+    const idx = db.coupons.findIndex((c) => c.id === id || c.code === id);
+    if (idx === -1) {
+      res.status(404).json({ error: "Coupon not found." });
+      return;
+    }
+    const coupon = db.coupons[idx];
+    if (!Array.isArray(db.deletedCouponIds)) {
+      db.deletedCouponIds = [];
+    }
+    if (!db.deletedCouponIds.includes(coupon.id)) {
+      db.deletedCouponIds.push(coupon.id);
+    }
+    if (coupon.code && !db.deletedCouponIds.includes(coupon.code)) {
+      db.deletedCouponIds.push(coupon.code);
+    }
+    db.coupons.splice(idx, 1);
+    await saveDb(db);
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        await client.from("coupons").delete().eq("id", coupon.id);
+      } catch {
+      }
+    }
+    res.json({ success: true, deleted: true, couponId: coupon.id });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to delete coupon: ${err?.message || "Unknown error"}` });
   }
-  db.coupons.splice(idx, 1);
-  await saveDb(db);
-  res.json({ deleted: true });
 });
 app.put("/api/admin/homepage", requireAdmin, async (req, res) => {
   const db = loadDb();
