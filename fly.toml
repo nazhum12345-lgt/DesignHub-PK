@@ -1,0 +1,34 @@
+# ==============================================================================
+# VELORA — Fly.io Configuration (fly.toml)
+# Portable container deployment with volume mount for persistent data
+# ==============================================================================
+
+app = "velora-studio"
+primary_region = "iad"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  HOST = "0.0.0.0"
+  DATA_DIR = "/data"
+  PRIVATE_STORAGE_DIR = "/data/private_storage"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[mounts]]
+  source = "velora_data"
+  destination = "/data"
+  initial_size = "5gb"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

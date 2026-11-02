@@ -1,0 +1,45 @@
+# ==============================================================================
+# VELORA — Docker Compose Configuration
+# Instant single-command full-stack container deployment with persistent storage
+# Usage:
+#   docker compose up -d --build
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  velora:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: velora_app
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      - VELORA_ADMIN_PASSWORD=${VELORA_ADMIN_PASSWORD:-ChangeMeInProduction123!}
+      - VELORA_SESSION_SECRET=${VELORA_SESSION_SECRET:-velora_session_secret_change_me_in_prod}
+      - VELORA_DOWNLOAD_SIGNING_SECRET=${VELORA_DOWNLOAD_SIGNING_SECRET:-velora_download_secret_change_me_in_prod}
+      - DATA_DIR=/app/data
+      - PRIVATE_STORAGE_DIR=/app/private_storage
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      # Persistent named volumes for database state and protected files
+      - velora_data:/app/data
+      - velora_private_storage:/app/private_storage
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/storefront"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  velora_data:
+    name: velora_production_data
+  velora_private_storage:
+    name: velora_production_private_storage

@@ -1,0 +1,6 @@
+{
+  "name": "DesignHub PK — Premium Digital Design Studio & Store",
+  "description": "Premium downloadable digital designs, social media templates, printables, and brand identity assets with instant JPG delivery and optional editable PSD upgrades.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

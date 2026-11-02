@@ -1,0 +1,15 @@
+# ==============================================================================
+# VELORA — Netlify Configuration (netlify.toml)
+# Note: Netlify standard hosting is for the static SPA frontend (dist/).
+# Full backend features (file uploads, persistent JSON db, HMAC download stream)
+# require Node.js / Docker container hosting (Render, Railway, VPS, Fly.io).
+# ==============================================================================
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

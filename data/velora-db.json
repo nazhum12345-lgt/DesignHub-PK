@@ -1,0 +1,60 @@
+{
+  "orders": [],
+  "coupons": [],
+  "products": [],
+  "customers": [
+    {
+      "id": "cust_29fe3b54d2cf",
+      "name": "waiz siddiqui",
+      "email": "waizsiddiqui.business@gmail.com",
+      "phone": "",
+      "wishlist": [],
+      "createdAt": "2026-10-03T14:05:02.139Z",
+      "passwordHash": "2e6131b634f19bcdc455bbb7fb5f21bb5c5f3b204a1e9ef332a8670bc8656c13"
+    }
+  ],
+  "downloads": [],
+  "adminEmail": "baigrahim12345@gmail.com",
+  "categories": [
+    {
+      "id": "cat_social_media",
+      "name": "Social Media",
+      "slug": "social-media",
+      "description": "Social media design templates",
+      "image": "",
+      "createdAt": "2026-10-31T19:52:26.322612+00:00"
+    },
+    {
+      "id": "cat_printables",
+      "name": "Printables",
+      "slug": "printables",
+      "description": "Printable digital designs",
+      "image": "",
+      "createdAt": "2026-10-31T19:52:26.322612+00:00"
+    },
+    {
+      "id": "cat_logos",
+      "name": "Logos",
+      "slug": "logos",
+      "description": "Logo and brand identity designs",
+      "image": "",
+      "createdAt": "2026-10-31T19:52:26.322612+00:00"
+    }
+  ],
+  "homepageConfig": {
+    "currencyCode": "PKR",
+    "promoSubtext": "Explore premium digital assets created for modern creators, businesses, and brands.",
+    "promoHeadline": "Because your brand deserves something exquisite.",
+    "currencySymbol": "PKR ",
+    "showPromoBanner": true,
+    "announcementText": "NEW DIGITAL DESIGNS — INSTANT DOWNLOADS",
+    "showAnnouncement": true,
+    "showFeaturedSection": true,
+    "showMostLovedSection": true,
+    "showPsdUpgradeSection": true,
+    "studioFeaturedProductIds": []
+  },
+  "contactInquiries": [],
+  "newsletterEmails": [],
+  "adminPasswordHash": "pbkdf2:10000:d32b3747b7c9ff0b218ed72a8a897f6d:e77cc2be277d5753992696e8fe03cde9eaea2360f0f5f1b68f1b8c6bd283c0a6"
+}

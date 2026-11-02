@@ -1,0 +1,37 @@
+# ==============================================================================
+# VELORA — Render Blueprint (render.yaml)
+# Full-Stack Node.js Web Service with Persistent Disk
+# Docs: https://render.com/docs/blueprint-spec
+# ==============================================================================
+
+services:
+  - type: web
+    name: velora-studio
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    disk:
+      name: velora-disk
+      mountPath: /app/data
+      sizeGB: 10
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /app/data
+      - key: PRIVATE_STORAGE_DIR
+        value: /app/data/private_storage
+      - key: VELORA_ADMIN_PASSWORD
+        sync: false
+      - key: VELORA_SESSION_SECRET
+        generateValue: true
+      - key: VELORA_DOWNLOAD_SIGNING_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
