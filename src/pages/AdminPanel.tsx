@@ -334,6 +334,9 @@ export function AdminPanel({
         fetchAdminDashboard(true);
       }, 4000);
       return () => clearInterval(interval);
+    } else {
+      setEmailInput('');
+      setPasswordInput('');
     }
   }, [adminToken, fetchAdminDashboard]);
 
@@ -1239,18 +1242,39 @@ export function AdminPanel({
             )
           ) : (
             <form onSubmit={handleLogin} autoComplete="off" className="space-y-4">
+              {/* Hidden dummy decoy inputs to trap browser autofill/password managers */}
+              <input
+                type="text"
+                name="prevent_autofill_email_decoy"
+                tabIndex={-1}
+                className="sr-only"
+                autoComplete="off"
+                aria-hidden="true"
+              />
+              <input
+                type="password"
+                name="prevent_autofill_password_decoy"
+                tabIndex={-1}
+                className="sr-only"
+                autoComplete="new-password"
+                aria-hidden="true"
+              />
+
               <div>
                 <label className="block text-xs font-medium text-[#231518] mb-1.5">
                   Admin Email (Gmail)
                 </label>
                 <input
                   type="email"
-                  name="velora_admin_email_manual"
+                  name="manual_admin_login_email"
+                  id="manual_admin_login_email"
                   required
-                  autoComplete="username"
+                  autoComplete="off"
+                  data-lpignore="true"
+                  data-form-type="other"
                   value={emailInput}
                   onChange={(e) => setEmailInput(e.target.value)}
-                  placeholder="Enter your admin email"
+                  placeholder="Enter your admin email manually"
                   className="w-full px-3.5 py-2.5 bg-[#FAF6F3] border border-[#E6DAD2] rounded-xs text-sm focus:outline-none focus:border-[#3D0F18]"
                 />
               </div>
@@ -1275,12 +1299,15 @@ export function AdminPanel({
                 <div className="relative">
                   <input
                     type={showPassword ? 'text' : 'password'}
-                    name="velora_admin_password_manual"
+                    name="manual_admin_login_password"
+                    id="manual_admin_login_password"
                     required
-                    autoComplete="current-password"
+                    autoComplete="new-password"
+                    data-lpignore="true"
+                    data-form-type="other"
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
-                    placeholder="Enter your admin password"
+                    placeholder="Enter your admin password manually"
                     className="w-full px-3.5 py-2.5 bg-[#FAF6F3] border border-[#E6DAD2] rounded-xs text-sm pr-10 focus:outline-none focus:border-[#3D0F18]"
                   />
                   <button
@@ -3305,19 +3332,6 @@ export function AdminPanel({
             </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-[#231518] mb-1">
-              Promotional Banner Headline
-            </label>
-            <input
-              type="text"
-              value={homepageConfig.promoHeadline}
-              onChange={(e) =>
-                setHomepageConfig({ ...homepageConfig, promoHeadline: e.target.value })
-              }
-              className="w-full px-3.5 py-2 bg-[#FAF6F3] border border-[#E6DAD2] rounded-xs text-xs"
-            />
-          </div>
 
           {/* DesignHub PK Studio Landing Page — Showcase Designs (3–4 PSD / JPG) */}
           <div className="pt-4 border-t border-[#E6DAD2]">
