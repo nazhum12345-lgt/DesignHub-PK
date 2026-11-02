@@ -203,7 +203,25 @@ export default function App() {
       if (!res.ok) return;
       const data = await res.json();
       setProducts(data.products || []);
-      setCategories(data.categories || []);
+      const deletedLocal: string[] = (() => {
+        try {
+          return JSON.parse(localStorage.getItem('velora_deleted_categories') || '[]');
+        } catch {
+          return [];
+        }
+      })();
+      const filteredCategories = (data.categories || []).filter((c: any) => {
+        const idLower = (c.id || '').toLowerCase();
+        const slugLower = (c.slug || '').toLowerCase();
+        const nameLower = (c.name || '').toLowerCase();
+        return !deletedLocal.some(
+          (d) =>
+            d.toLowerCase() === idLower ||
+            d.toLowerCase() === slugLower ||
+            d.toLowerCase() === nameLower
+        );
+      });
+      setCategories(filteredCategories);
       if (data.homepageConfig) {
         setHomepageConfig(data.homepageConfig);
       }

@@ -186,6 +186,18 @@ function normalizeSchemaArrays(schema) {
   if (!Array.isArray(schema.deletedCouponIds)) schema.deletedCouponIds = [];
   if (!Array.isArray(schema.newsletterEmails)) schema.newsletterEmails = [];
   if (!Array.isArray(schema.contactInquiries)) schema.contactInquiries = [];
+  if (schema.deletedCategoryIds.length > 0) {
+    const delCatSet = new Set(schema.deletedCategoryIds.map((x) => x.toLowerCase().trim()));
+    schema.categories = schema.categories.filter(
+      (c) => !delCatSet.has(c.id.toLowerCase().trim()) && !delCatSet.has(c.slug.toLowerCase().trim()) && !delCatSet.has(c.name.toLowerCase().trim())
+    );
+  }
+  if (schema.deletedProductIds.length > 0) {
+    const delProdSet = new Set(schema.deletedProductIds.map((x) => x.toLowerCase().trim()));
+    schema.products = schema.products.filter(
+      (p) => !delProdSet.has(p.id.toLowerCase().trim()) && !delProdSet.has(p.slug.toLowerCase().trim())
+    );
+  }
   schema.products = schema.products.map((p) => {
     const anyP = p;
     return {
@@ -340,7 +352,9 @@ async function ensureDbLoaded() {
         localDb.products = mappedProducts;
       }
       if (!catErr && Array.isArray(supaCategories)) {
-        const deletedCatSet = new Set(localDb.deletedCategoryIds || []);
+        const deletedCatSet = new Set(
+          (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
+        );
         const mappedCategories = supaCategories.map((row) => ({
           id: row.id,
           name: row.name,
@@ -348,17 +362,21 @@ async function ensureDbLoaded() {
           description: row.description || "",
           image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
           createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString()
-        })).filter((c) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug));
+        })).filter(
+          (c) => !deletedCatSet.has(c.id.toLowerCase().trim()) && !deletedCatSet.has(c.slug.toLowerCase().trim()) && !deletedCatSet.has(c.name.toLowerCase().trim())
+        );
         localDb.categories = mappedCategories;
       }
     } catch {
     }
   }
   dbCache = localDb;
+  normalizeSchemaArrays(localDb);
   return localDb;
 }
 function loadDb() {
   if (dbCache) {
+    normalizeSchemaArrays(dbCache);
     return dbCache;
   }
   return loadLocalFileDb();
@@ -1186,8 +1204,12 @@ app.get("/api/health", async (_req, res) => {
 });
 app.get("/api/storefront", (_req, res) => {
   const db = loadDb();
+  const deletedCatSet = new Set((db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim()));
+  const activeCategories = (db.categories || []).filter(
+    (c) => !deletedCatSet.has(c.id.toLowerCase().trim()) && !deletedCatSet.has(c.slug.toLowerCase().trim()) && !deletedCatSet.has(c.name.toLowerCase().trim())
+  );
   res.json({
-    categories: db.categories,
+    categories: activeCategories,
     products: db.products.map(sanitizeProductForPublic),
     homepageConfig: db.homepageConfig,
     paymentGateways: {
@@ -2212,7 +2234,10 @@ app.get("/api/admin/dashboard", requireAdmin, (_req, res) => {
       activeDownloadsCount: db.downloads.length
     },
     products: db.products.map(sanitizeProductForPublic),
-    categories: db.categories,
+    categories: (db.categories || []).filter((c) => {
+      const delSet = new Set((db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim()));
+      return !delSet.has(c.id.toLowerCase().trim()) && !delSet.has(c.slug.toLowerCase().trim()) && !delSet.has(c.name.toLowerCase().trim());
+    }),
     orders: [...db.orders].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).map((o) => ({
       ...o,
       downloads: buildDownloadRecordsForOrder(db, o.orderId)
@@ -2584,14 +2609,20 @@ app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
   try {
     await ensureDbLoaded();
     const db = loadDb();
-    const { id } = req.params;
-    const cat = db.categories.find((c) => c.id === id || c.slug === id);
+    const rawId = req.params.id;
+    const cleanId = decodeURIComponent(rawId).trim().toLowerCase();
+    const cat = db.categories.find(
+      (c) => c.id.toLowerCase() === cleanId || c.slug.toLowerCase() === cleanId || c.name.toLowerCase() === cleanId || c.id === rawId || c.slug === rawId
+    );
     if (!cat) {
-      res.status(404).json({ error: "Category not found." });
+      if (!Array.isArray(db.deletedCategoryIds)) db.deletedCategoryIds = [];
+      if (!db.deletedCategoryIds.includes(cleanId)) db.deletedCategoryIds.push(cleanId);
+      await saveDb(db);
+      res.json({ success: true, deleted: true, categoryId: rawId, message: "Category already deleted." });
       return;
     }
     const associatedProducts = db.products.filter(
-      (p) => p.category === cat.name || p.category === cat.id || p.category === cat.slug
+      (p) => p.category && p.category.toLowerCase() === cat.name.toLowerCase() || p.category && p.category.toLowerCase() === cat.slug.toLowerCase() || p.category === cat.id
     );
     if (associatedProducts.length > 0) {
       const productTitles = associatedProducts.map((p) => `"${p.title}"`).slice(0, 3).join(", ");
@@ -2605,16 +2636,19 @@ app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
     if (!Array.isArray(db.deletedCategoryIds)) {
       db.deletedCategoryIds = [];
     }
-    if (!db.deletedCategoryIds.includes(cat.id)) {
-      db.deletedCategoryIds.push(cat.id);
+    const toTombstone = [cat.id, cat.slug, cat.name, rawId, cleanId].filter(Boolean);
+    for (const val of toTombstone) {
+      if (!db.deletedCategoryIds.includes(val)) {
+        db.deletedCategoryIds.push(val);
+      }
+      const lower = val.toLowerCase();
+      if (!db.deletedCategoryIds.includes(lower)) {
+        db.deletedCategoryIds.push(lower);
+      }
     }
-    if (cat.slug && !db.deletedCategoryIds.includes(cat.slug)) {
-      db.deletedCategoryIds.push(cat.slug);
-    }
-    const idx = db.categories.findIndex((c) => c.id === cat.id);
-    if (idx !== -1) {
-      db.categories.splice(idx, 1);
-    }
+    db.categories = db.categories.filter(
+      (c) => c.id !== cat.id && c.slug !== cat.slug && c.name.toLowerCase() !== cat.name.toLowerCase() && c.id.toLowerCase() !== cleanId && c.slug.toLowerCase() !== cleanId
+    );
     await saveDb(db);
     const client = getSupabaseServerClient();
     if (client) {

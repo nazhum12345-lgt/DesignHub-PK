@@ -865,8 +865,15 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/storefront', (_req, res) => {
   const db = loadDb();
+  const deletedCatSet = new Set((db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim()));
+  const activeCategories = (db.categories || []).filter(
+    (c) =>
+      !deletedCatSet.has(c.id.toLowerCase().trim()) &&
+      !deletedCatSet.has(c.slug.toLowerCase().trim()) &&
+      !deletedCatSet.has(c.name.toLowerCase().trim())
+  );
   res.json({
-    categories: db.categories,
+    categories: activeCategories,
     products: db.products.map(sanitizeProductForPublic),
     homepageConfig: db.homepageConfig,
     paymentGateways: {
@@ -2316,7 +2323,14 @@ app.get('/api/admin/dashboard', requireAdmin, (_req, res) => {
       activeDownloadsCount: db.downloads.length,
     },
     products: db.products.map(sanitizeProductForPublic),
-    categories: db.categories,
+    categories: (db.categories || []).filter((c) => {
+      const delSet = new Set((db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim()));
+      return (
+        !delSet.has(c.id.toLowerCase().trim()) &&
+        !delSet.has(c.slug.toLowerCase().trim()) &&
+        !delSet.has(c.name.toLowerCase().trim())
+      );
+    }),
     orders: [...db.orders]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .map((o) => ({
@@ -2818,20 +2832,33 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
   try {
     await ensureDbLoaded();
     const db = loadDb();
-    const { id } = req.params;
+    const rawId = req.params.id;
+    const cleanId = decodeURIComponent(rawId).trim().toLowerCase();
 
-    const cat = db.categories.find((c) => c.id === id || c.slug === id);
+    const cat = db.categories.find(
+      (c) =>
+        c.id.toLowerCase() === cleanId ||
+        c.slug.toLowerCase() === cleanId ||
+        c.name.toLowerCase() === cleanId ||
+        c.id === rawId ||
+        c.slug === rawId
+    );
+
     if (!cat) {
-      res.status(404).json({ error: 'Category not found.' });
+      // If already deleted or not found, still ensure cleanId is tombstoned to prevent resurrection
+      if (!Array.isArray(db.deletedCategoryIds)) db.deletedCategoryIds = [];
+      if (!db.deletedCategoryIds.includes(cleanId)) db.deletedCategoryIds.push(cleanId);
+      await saveDb(db);
+      res.json({ success: true, deleted: true, categoryId: rawId, message: 'Category already deleted.' });
       return;
     }
 
     // Safety check: Are there any associated products?
     const associatedProducts = db.products.filter(
       (p) =>
-        p.category === cat.name ||
-        p.category === cat.id ||
-        p.category === cat.slug
+        (p.category && p.category.toLowerCase() === cat.name.toLowerCase()) ||
+        (p.category && p.category.toLowerCase() === cat.slug.toLowerCase()) ||
+        p.category === cat.id
     );
 
     if (associatedProducts.length > 0) {
@@ -2851,18 +2878,26 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
     if (!Array.isArray(db.deletedCategoryIds)) {
       db.deletedCategoryIds = [];
     }
-    if (!db.deletedCategoryIds.includes(cat.id)) {
-      db.deletedCategoryIds.push(cat.id);
-    }
-    if (cat.slug && !db.deletedCategoryIds.includes(cat.slug)) {
-      db.deletedCategoryIds.push(cat.slug);
+    const toTombstone = [cat.id, cat.slug, cat.name, rawId, cleanId].filter(Boolean);
+    for (const val of toTombstone) {
+      if (!db.deletedCategoryIds.includes(val)) {
+        db.deletedCategoryIds.push(val);
+      }
+      const lower = val.toLowerCase();
+      if (!db.deletedCategoryIds.includes(lower)) {
+        db.deletedCategoryIds.push(lower);
+      }
     }
 
-    // 2. Remove from local in-memory database
-    const idx = db.categories.findIndex((c) => c.id === cat.id);
-    if (idx !== -1) {
-      db.categories.splice(idx, 1);
-    }
+    // 2. Remove all matching entries from local in-memory database
+    db.categories = db.categories.filter(
+      (c) =>
+        c.id !== cat.id &&
+        c.slug !== cat.slug &&
+        c.name.toLowerCase() !== cat.name.toLowerCase() &&
+        c.id.toLowerCase() !== cleanId &&
+        c.slug.toLowerCase() !== cleanId
+    );
 
     // 3. Persist immediately to database file
     await saveDb(db);

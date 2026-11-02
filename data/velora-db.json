@@ -31,14 +31,6 @@
       "description": "Printable digital designs",
       "image": "/src/assets/images/velora_printables_studio_clean_1790691336397.jpg",
       "createdAt": "2026-10-31T19:52:26.322612+00:00"
-    },
-    {
-      "id": "cat_logos",
-      "name": "Logos",
-      "slug": "logos",
-      "description": "Logo and brand identity designs",
-      "image": "/src/assets/images/velora_logos_studio_clean_1790691349764.jpg",
-      "createdAt": "2026-10-31T19:52:26.322612+00:00"
     }
   ],
   "homepageConfig": {
@@ -61,7 +53,13 @@
     "cat_825fb6eb",
     "temporary-verification-category",
     "cat_d18321c6",
-    "protected-category"
+    "protected-category",
+    "cat_logos",
+    "logos",
+    "cat_bd3898c3",
+    "permanent-test-discipline",
+    "Permanent Test Discipline",
+    "permanent test discipline"
   ],
   "deletedProductIds": [
     "prod_50ac683bffe0",

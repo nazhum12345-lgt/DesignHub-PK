@@ -292,7 +292,22 @@ export function AdminPanel({
           }
           setStats(data.stats);
           setProducts(data.products || []);
-          setCategories(data.categories || []);
+          const deletedLocal: string[] = (() => {
+            try {
+              return JSON.parse(localStorage.getItem('velora_deleted_categories') || '[]');
+            } catch {
+              return [];
+            }
+          })();
+          const filteredCategories = (data.categories || []).filter((c: any) => {
+            const idLower = (c.id || '').toLowerCase();
+            const slugLower = (c.slug || '').toLowerCase();
+            const nameLower = (c.name || '').toLowerCase();
+            return !deletedLocal.some(
+              (d) => d.toLowerCase() === idLower || d.toLowerCase() === slugLower || d.toLowerCase() === nameLower
+            );
+          });
+          setCategories(filteredCategories);
           setOrders(data.orders || []);
           if (data.homepageConfig) {
             setHomepageConfig(data.homepageConfig);
@@ -844,6 +859,16 @@ export function AdminPanel({
         }),
       });
       if (res.ok) {
+        // Clear from local tombstones if recreated
+        try {
+          const currentDeleted: string[] = JSON.parse(
+            localStorage.getItem('velora_deleted_categories') || '[]'
+          );
+          const nameLower = catName.trim().toLowerCase();
+          const updated = currentDeleted.filter((d) => d.toLowerCase() !== nameLower);
+          localStorage.setItem('velora_deleted_categories', JSON.stringify(updated));
+        } catch {}
+
         onNotify(editingCategoryId ? 'Category updated.' : 'Category created.');
         resetCategoryForm();
         await fetchAdminDashboard();
@@ -856,6 +881,9 @@ export function AdminPanel({
 
   const handleDeleteCategory = async (id: string) => {
     try {
+      const catToDelete = categories.find(
+        (c) => c.id === id || c.slug === id || c.name.toLowerCase() === id.toLowerCase()
+      );
       const res = await fetch(getApiUrl(`/api/admin/categories/${id}`), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${adminToken}` },
@@ -863,7 +891,37 @@ export function AdminPanel({
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         onNotify('Category permanently deleted.');
-        setCategories((prev) => prev.filter((c) => c.id !== id));
+
+        // Record permanent tombstone in browser storage
+        try {
+          const currentDeleted: string[] = JSON.parse(
+            localStorage.getItem('velora_deleted_categories') || '[]'
+          );
+          const toAdd = [
+            id,
+            catToDelete?.id,
+            catToDelete?.slug,
+            catToDelete?.name,
+          ].filter(Boolean) as string[];
+          for (const item of toAdd) {
+            if (!currentDeleted.includes(item)) currentDeleted.push(item);
+            if (!currentDeleted.includes(item.toLowerCase())) currentDeleted.push(item.toLowerCase());
+          }
+          localStorage.setItem('velora_deleted_categories', JSON.stringify(currentDeleted));
+        } catch {}
+
+        setCategories((prev) =>
+          prev.filter(
+            (c) =>
+              c.id !== id &&
+              c.slug !== id &&
+              c.name.toLowerCase() !== id.toLowerCase() &&
+              (!catToDelete ||
+                (c.id !== catToDelete.id &&
+                  c.slug !== catToDelete.slug &&
+                  c.name.toLowerCase() !== catToDelete.name.toLowerCase()))
+          )
+        );
         await fetchAdminDashboard();
         await onStorefrontUpdated();
       } else {

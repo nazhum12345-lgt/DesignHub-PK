@@ -399,6 +399,27 @@ function normalizeSchemaArrays(schema: DatabaseSchema) {
   if (!Array.isArray(schema.newsletterEmails)) schema.newsletterEmails = [];
   if (!Array.isArray(schema.contactInquiries)) schema.contactInquiries = [];
 
+  // Active tombstone filter: permanently exclude deleted categories
+  if (schema.deletedCategoryIds.length > 0) {
+    const delCatSet = new Set(schema.deletedCategoryIds.map((x) => x.toLowerCase().trim()));
+    schema.categories = schema.categories.filter(
+      (c) =>
+        !delCatSet.has(c.id.toLowerCase().trim()) &&
+        !delCatSet.has(c.slug.toLowerCase().trim()) &&
+        !delCatSet.has(c.name.toLowerCase().trim())
+    );
+  }
+
+  // Active tombstone filter: permanently exclude deleted products
+  if (schema.deletedProductIds.length > 0) {
+    const delProdSet = new Set(schema.deletedProductIds.map((x) => x.toLowerCase().trim()));
+    schema.products = schema.products.filter(
+      (p) =>
+        !delProdSet.has(p.id.toLowerCase().trim()) &&
+        !delProdSet.has(p.slug.toLowerCase().trim())
+    );
+  }
+
   schema.products = schema.products.map((p) => {
     const anyP = p as any;
     return {
@@ -614,7 +635,9 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
       }
 
       if (!catErr && Array.isArray(supaCategories)) {
-        const deletedCatSet = new Set(localDb.deletedCategoryIds || []);
+        const deletedCatSet = new Set(
+          (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
+        );
         // Map Supabase categories to StoredCategory format authoritatively
         const mappedCategories = supaCategories
           .map((row: any) => ({
@@ -625,7 +648,12 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
             image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
             createdAt: row.created_at || new Date().toISOString(),
           }))
-          .filter((c: any) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug));
+          .filter(
+            (c: any) =>
+              !deletedCatSet.has(c.id.toLowerCase().trim()) &&
+              !deletedCatSet.has(c.slug.toLowerCase().trim()) &&
+              !deletedCatSet.has(c.name.toLowerCase().trim())
+          );
         localDb.categories = mappedCategories;
       }
     } catch {
@@ -634,6 +662,7 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
   }
 
   dbCache = localDb;
+  normalizeSchemaArrays(localDb);
   return localDb;
 }
 
@@ -642,6 +671,7 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
  */
 export function loadDb(): DatabaseSchema {
   if (dbCache) {
+    normalizeSchemaArrays(dbCache);
     return dbCache;
   }
   return loadLocalFileDb();
