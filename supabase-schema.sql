@@ -267,13 +267,9 @@ CREATE POLICY "Public can read homepage config"
   ON public.homepage_config FOR SELECT
   USING (true);
 
--- 13. SEED INITIAL LUXURY CATEGORIES (ZERO DEMO PRODUCTS)
-INSERT INTO public.categories (id, name, slug, description, image)
-VALUES
-  ('cat_social_media', 'Social Media', 'social-media', 'Editorial Instagram post templates, story packs, and high-converting carousel designs.', '/src/assets/images/velora_cat_social_media_1790670021007.jpg'),
-  ('cat_printables', 'Printables', 'printables', 'Fine art wedding suites, stationery paper goods, and museum-grade printable artboards.', '/src/assets/images/velora_cat_printables_1790670036140.jpg'),
-  ('cat_logos', 'Logos', 'logos', 'Minimalist monograms, bespoke emblems, and timeless brand identity kits.', '/src/assets/images/velora_cat_logos_1790670048012.jpg')
-ON CONFLICT (id) DO NOTHING;
+-- 13. CATEGORIES MANAGEMENT (ZERO DEMO SEEDING)
+-- Production categories are created and managed by the store administrator.
+-- No demo or sample categories are automatically seeded.
 
 -- 14. INITIAL HOMEPAGE CONFIG
 INSERT INTO public.homepage_config (id, config)

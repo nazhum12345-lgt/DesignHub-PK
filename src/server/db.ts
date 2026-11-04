@@ -225,33 +225,16 @@ const TMP_FILES_DB_FILE = path.join(TMP_DATA_DIR, 'velora-files.json');
 
 let writeQueuePromise: Promise<any> = Promise.resolve();
 
-// Standard Category Definitions (Design disciplines)
-export const INITIAL_CATEGORIES = [
-  {
-    id: 'cat_social_media',
-    name: 'Social Media',
-    slug: 'social-media',
-    description: 'Editorial Instagram post templates, story packs, and high-converting carousel designs.',
-    image: '/src/assets/images/velora_cat_social_media_1790670021007.jpg',
-    createdAt: '2026-10-01T00:00:00.000Z',
-  },
-  {
-    id: 'cat_printables',
-    name: 'Printables',
-    slug: 'printables',
-    description: 'Fine art wedding suites, stationery paper goods, and museum-grade printable artboards.',
-    image: '/src/assets/images/velora_cat_printables_1790670036140.jpg',
-    createdAt: '2026-10-01T00:00:00.000Z',
-  },
-  {
-    id: 'cat_logos',
-    name: 'Logos',
-    slug: 'logos',
-    description: 'Minimalist monograms, bespoke emblems, and timeless brand identity kits.',
-    image: '/src/assets/images/velora_cat_logos_1790670048012.jpg',
-    createdAt: '2026-10-01T00:00:00.000Z',
-  },
-];
+// ZERO DEMO CATEGORIES: Categories are created and managed by the administrator.
+// No sample or demo categories are automatically seeded into production.
+export const INITIAL_CATEGORIES: Array<{
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  image: string;
+  createdAt: string;
+}> = [];
 
 // ZERO DEMO PRODUCTS: Products array begins empty.
 // No JPG or PSD is purchasable until the admin publishes products in the Admin Panel.
@@ -772,10 +755,15 @@ export async function saveDb(data: DatabaseSchema): Promise<DatabaseSchema> {
       if (client) {
         try {
           // Sync categories (excluding any tombstoned deleted categories)
-          const deletedCatSet = new Set(data.deletedCategoryIds || []);
-          const activeCategories = (data.categories || []).filter(
-            (c) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug)
+          const deletedCatSet = new Set(
+            (data.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
           );
+          const activeCategories = (data.categories || []).filter((c) => {
+            const id = (c.id || '').toLowerCase().trim();
+            const slug = (c.slug || '').toLowerCase().trim();
+            const name = (c.name || '').toLowerCase().trim();
+            return !deletedCatSet.has(id) && !deletedCatSet.has(slug) && !deletedCatSet.has(name);
+          });
 
           if (activeCategories.length > 0) {
             try {

@@ -50,11 +50,12 @@ async function runSeed() {
       !d.productTitle.toLowerCase().includes('test')
   );
 
-  // If products are empty, populate curated initial products
-  if (current.products.length === 0) {
-    console.log('🌱 Populating initial curated luxury products...');
-    current.products = [...INITIAL_DATABASE.products];
-    current.categories = [...INITIAL_DATABASE.categories];
+  // Ensure products and categories are valid arrays without auto-seeding demo categories
+  if (!Array.isArray(current.products)) {
+    current.products = [];
+  }
+  if (!Array.isArray(current.categories)) {
+    current.categories = [];
   }
 
   await saveDb(current);
