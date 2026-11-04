@@ -205,6 +205,7 @@ interface StoredProduct {
   limited: boolean;
   seoTitle?: string;
   seoDescription?: string;
+  isPublished?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -979,12 +980,14 @@ app.post('/api/orders', async (req, res) => {
     customerName,
     email,
     phone,
+    couponCode,
   } = req.body as {
     customerName?: string;
     email?: string;
     phone?: string;
     country?: string;
     billingCity?: string;
+    couponCode?: string;
     items: Array<{
       productId?: string;
       id?: string;
@@ -1024,6 +1027,7 @@ app.post('/api/orders', async (req, res) => {
       return;
     }
 
+    // Server-authoritative price calculation from trusted database record
     const jpgPrice = Number(product.jpgPrice) || 0;
     const psdUpgradePrice = wantsPsd ? Number(product.psdUpgradePrice) || 0 : 0;
     const itemTotal = jpgPrice + psdUpgradePrice;
@@ -1042,7 +1046,35 @@ app.post('/api/orders', async (req, res) => {
     });
   }
 
-  const discount = 0;
+  // Server-authoritative coupon verification and discount calculation
+  let discount = 0;
+  let appliedCouponCode: string | undefined = undefined;
+
+  if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
+    const normalizedCode = couponCode.trim().toUpperCase();
+    const coupon = db.coupons.find((c) => c.code.toUpperCase() === normalizedCode && c.active);
+    if (coupon) {
+      const isExpired = coupon.expiresAt && Date.now() > new Date(coupon.expiresAt).getTime();
+      const isLimitReached = coupon.usageLimit && coupon.usedCount >= coupon.usageLimit;
+      if (!isExpired && !isLimitReached) {
+        let eligibleSubtotal = 0;
+        for (const item of orderItems) {
+          if (coupon.restrictedCategory && item.category !== coupon.restrictedCategory) continue;
+          if (coupon.restrictedProductId && item.productId !== coupon.restrictedProductId) continue;
+          eligibleSubtotal += item.itemTotal;
+        }
+        if (eligibleSubtotal > 0) {
+          discount =
+            coupon.type === 'percentage'
+              ? Math.round((eligibleSubtotal * coupon.value) / 100)
+              : Math.min(eligibleSubtotal, coupon.value);
+          appliedCouponCode = coupon.code;
+          coupon.usedCount = (coupon.usedCount || 0) + 1;
+        }
+      }
+    }
+  }
+
   const total = Math.max(0, subtotal - discount);
   const now = new Date().toISOString();
   const orderId = `VEL-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
@@ -1089,7 +1121,8 @@ app.post('/api/orders', async (req, res) => {
     billingCity: '',
     items: orderItems,
     subtotal,
-    discount: 0,
+    discount,
+    couponCode: appliedCouponCode,
     total,
     paymentMethod: paymentMethod === 'jazzcash' ? 'jazzcash' : paymentMethod,
     recipientJazzCashNumber: recipientJazzCashNumber || '03192644717',
@@ -2510,11 +2543,38 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
       ? previewImages.filter(Boolean)
       : ['/src/assets/images/velora_hero_editorial_1790670008130.jpg'];
 
+  // If preview is base64 data URL, persist it to disk and serve via static URL
+  let savedPreviewUrl = validPreviews[0];
+  if (savedPreviewUrl?.startsWith('data:image/')) {
+    try {
+      const uploadDir = path.resolve(process.cwd(), 'public', 'assets', 'images');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      const match = savedPreviewUrl.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+      if (match) {
+        const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+        const previewFileName = `${id}_preview.${ext}`;
+        const previewFilePath = path.join(uploadDir, previewFileName);
+        const buf = Buffer.from(match[2], 'base64');
+        fs.writeFileSync(previewFilePath, buf);
+        const distImgDir = path.resolve(process.cwd(), 'dist', 'assets', 'images');
+        if (fs.existsSync(distImgDir)) {
+          fs.writeFileSync(path.join(distImgDir, previewFileName), buf);
+        }
+        savedPreviewUrl = `/assets/images/${previewFileName}`;
+      }
+    } catch (imgErr) {
+      console.warn('[IMAGE SAVE] Could not write preview to file, preserving data URL:', imgErr);
+    }
+  }
+  const finalPreviews = [savedPreviewUrl, ...validPreviews.slice(1)];
+
   const jpgStorageKey = `${id}_standard.jpg`;
   saveProtectedDigitalFile(
     jpgStorageKey,
     jpgFileDataUrl,
-    validPreviews[0],
+    finalPreviews[0],
     'JPG',
     title.trim()
   );
@@ -2531,7 +2591,7 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
     slug: cleanSlug,
     category: category?.trim() || 'Social Media',
     description: description?.trim() || '',
-    previewImages: validPreviews,
+    previewImages: finalPreviews,
     jpgStorageKey,
     jpgFileName: jpgFileName?.trim() || `${cleanSlug}-velora.jpg`,
     jpgPrice: Number(jpgPrice),
@@ -2574,6 +2634,7 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
     limited: Boolean(limited),
     seoTitle: seoTitle?.trim() || `${title.trim()} — VELORA Digital Design`,
     seoDescription: seoDescription?.trim() || description?.trim() || '',
+    isPublished: true,
     createdAt: now,
     updatedAt: now,
   };
@@ -2587,6 +2648,7 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
 
   db.products.unshift(product);
   await saveDb(db);
+  console.info(`[DesignHub PK Product] Successfully created product "${product.title}" (${product.id})`);
   res.status(201).json({ product: sanitizeProductForPublic(product) });
 });
 
@@ -2638,7 +2700,32 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
   if (category !== undefined) product.category = category.trim();
   if (description !== undefined) product.description = description.trim();
   if (Array.isArray(previewImages) && previewImages.filter(Boolean).length > 0) {
-    product.previewImages = previewImages.filter(Boolean);
+    const rawPreviews = previewImages.filter(Boolean);
+    let savedPreviewUrl = rawPreviews[0];
+    if (savedPreviewUrl?.startsWith('data:image/')) {
+      try {
+        const uploadDir = path.resolve(process.cwd(), 'public', 'assets', 'images');
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        const match = savedPreviewUrl.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+        if (match) {
+          const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+          const previewFileName = `${product.id}_preview.${ext}`;
+          const previewFilePath = path.join(uploadDir, previewFileName);
+          const buf = Buffer.from(match[2], 'base64');
+          fs.writeFileSync(previewFilePath, buf);
+          const distImgDir = path.resolve(process.cwd(), 'dist', 'assets', 'images');
+          if (fs.existsSync(distImgDir)) {
+            fs.writeFileSync(path.join(distImgDir, previewFileName), buf);
+          }
+          savedPreviewUrl = `/assets/images/${previewFileName}`;
+        }
+      } catch (imgErr) {
+        console.warn('[IMAGE SAVE] Could not write preview to file, preserving data URL:', imgErr);
+      }
+    }
+    product.previewImages = [savedPreviewUrl, ...rawPreviews.slice(1)];
   }
   if (jpgPrice !== undefined) product.jpgPrice = Number(jpgPrice);
   if (oldPrice !== undefined) product.oldPrice = oldPrice ? Number(oldPrice) : null;
@@ -2693,6 +2780,7 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
   if (limited !== undefined) product.limited = Boolean(limited);
   if (seoTitle !== undefined) product.seoTitle = seoTitle.trim();
   if (seoDescription !== undefined) product.seoDescription = seoDescription.trim();
+  product.isPublished = true;
 
   product.updatedAt = new Date().toISOString();
 

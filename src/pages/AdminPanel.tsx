@@ -787,6 +787,15 @@ export function AdminPanel({
         return;
       }
 
+      if (data.product) {
+        setProducts((prev) => {
+          if (editingProductId) {
+            return prev.map((p) => (p.id === editingProductId ? data.product : p));
+          }
+          return [data.product, ...prev.filter((p) => p.id !== data.product.id)];
+        });
+      }
+
       onNotify(
         editingProductId
           ? 'Product updated and published to storefront.'
@@ -812,6 +821,7 @@ export function AdminPanel({
         headers: { Authorization: `Bearer ${adminToken}` },
       });
       if (res.ok) {
+        setProducts((prev) => prev.filter((p) => p.id !== id && p.slug !== id));
         onNotify('Product deleted — storefront updated.');
         await fetchAdminDashboard();
         await onStorefrontUpdated();

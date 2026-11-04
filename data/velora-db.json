@@ -1,6 +1,16 @@
 {
   "orders": [],
-  "coupons": [],
+  "coupons": [
+    {
+      "id": "coup_velora10",
+      "code": "VELORA10",
+      "type": "percentage",
+      "value": 10,
+      "active": true,
+      "usedCount": 1,
+      "createdAt": "2026-10-01T00:00:00.000Z"
+    }
+  ],
   "products": [],
   "customers": [
     {
@@ -65,7 +75,13 @@
     "prod_50ac683bffe0",
     "sample-digital-asset-for-deletion-test",
     "prod_25f61ae1ec8a",
-    "protected-suite-design"
+    "protected-suite-design",
+    "prod_2e8e1e212d38",
+    "verification-luxury-serif-brand-kit",
+    "prod_5efd8fca9b99",
+    "security-verified-brand-identity-suite",
+    "prod_5e637e8e8a61",
+    "audit-target-product-for-order-tests"
   ],
   "deletedOrderIds": [],
   "deletedCouponIds": []

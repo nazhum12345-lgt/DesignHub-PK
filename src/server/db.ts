@@ -195,15 +195,18 @@ export const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 let supabaseClient: SupabaseClient | null = null;
+let currentClientKey = '';
 
 export function getSupabaseServerClient(): SupabaseClient | null {
-  if (supabaseClient) return supabaseClient;
-  const key = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY;
+  const key = serviceKey || SUPABASE_ANON_KEY;
   if (!SUPABASE_URL || !key) return null;
+  if (supabaseClient && currentClientKey === key) return supabaseClient;
   try {
     supabaseClient = createClient(SUPABASE_URL, key, {
       auth: { persistSession: false },
     });
+    currentClientKey = key;
     return supabaseClient;
   } catch (err) {
     console.warn('[SUPABASE] Server client initialization error:', err);
@@ -300,12 +303,10 @@ function cleanTestData(data: DatabaseSchema): boolean {
     const originalCount = data.products.length;
     data.products = data.products.filter((p) => {
       const isTest =
-        p.id.toLowerCase().includes('test') ||
-        p.title.toLowerCase().includes('automated test') ||
-        p.title.toLowerCase().includes('temporary verification') ||
-        p.slug.toLowerCase().includes('temp-test') ||
-        p.jpgStorageKey === 'demo_aurelia_arch.jpg' ||
-        p.jpgStorageKey === 'sample.jpg';
+        p.id === 'probe_test_synthetic_health_check' ||
+        p.id === 'automated_test_probe_record' ||
+        p.title === '__automated_synthetic_probe__' ||
+        p.title === 'Temporary Verification Probe';
       return !isTest;
     });
     if (data.products.length !== originalCount) changed = true;
@@ -597,16 +598,18 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
       const catErr = catRes?.error;
 
       if (!prodErr && Array.isArray(supaProducts)) {
-        const deletedProdSet = new Set(localDb.deletedProductIds || []);
+        const deletedProdSet = new Set(
+          (localDb.deletedProductIds || []).map((x) => x.toLowerCase().trim())
+        );
         // Map Supabase snake_case rows to StoredProduct format
-        const mappedProducts: StoredProduct[] = supaProducts
+        const remoteProducts: StoredProduct[] = supaProducts
           .map((row: any) => ({
             id: row.id,
             title: row.title,
             slug: row.slug,
             category: row.category,
             description: row.description || '',
-            previewImages: row.preview_images || [],
+            previewImages: Array.isArray(row.preview_images) ? row.preview_images : [],
             jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
             jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
             jpgPrice: Number(row.jpg_price || 0),
@@ -618,8 +621,8 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
             dimensions: row.dimensions || '',
             compatibility: row.compatibility || '',
             usageRights: row.usage_rights || '',
-            whatsIncluded: row.whats_included || [],
-            tags: row.tags || [],
+            whatsIncluded: Array.isArray(row.whats_included) ? row.whats_included : [],
+            tags: Array.isArray(row.tags) ? row.tags : [],
             featured: Boolean(row.featured),
             bestseller: Boolean(row.bestseller),
             new: Boolean(row.is_new),
@@ -630,8 +633,42 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
             createdAt: row.created_at || new Date().toISOString(),
             updatedAt: row.updated_at || new Date().toISOString(),
           }))
-          .filter((p: StoredProduct) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug));
-        localDb.products = mappedProducts;
+          .filter(
+            (p: StoredProduct) =>
+              !deletedProdSet.has((p.id || '').toLowerCase().trim()) &&
+              !deletedProdSet.has((p.slug || '').toLowerCase().trim())
+          );
+
+        // Resilient Product Merge:
+        // 1. Populate productMap with remote products from Supabase
+        const productMap = new Map<string, StoredProduct>();
+        for (const rp of remoteProducts) {
+          productMap.set(rp.id, rp);
+        }
+
+        // 2. Preserve any existing local products that are NOT tombstoned
+        for (const lp of localDb.products || []) {
+          const idKey = (lp.id || '').toLowerCase().trim();
+          const slugKey = (lp.slug || '').toLowerCase().trim();
+          if (deletedProdSet.has(idKey) || deletedProdSet.has(slugKey)) {
+            continue; // Skip tombstoned / deleted products
+          }
+
+          if (productMap.has(lp.id)) {
+            // Both remote and local exist: compare timestamps to keep latest edits
+            const remoteP = productMap.get(lp.id)!;
+            const remoteTime = new Date(remoteP.updatedAt || 0).getTime();
+            const localTime = new Date(lp.updatedAt || 0).getTime();
+            if (localTime >= remoteTime) {
+              productMap.set(lp.id, { ...remoteP, ...lp });
+            }
+          } else {
+            // Local product not yet in Supabase (or RLS-protected) — NEVER DISCARD!
+            productMap.set(lp.id, lp);
+          }
+        }
+
+        localDb.products = Array.from(productMap.values());
       }
 
       if (!catErr && Array.isArray(supaCategories)) {
@@ -639,7 +676,7 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
           (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
         );
         // Map Supabase categories to StoredCategory format authoritatively
-        const mappedCategories = supaCategories
+        const remoteCategories = supaCategories
           .map((row: any) => ({
             id: row.id,
             name: row.name,
@@ -654,7 +691,26 @@ export async function ensureDbLoaded(): Promise<DatabaseSchema> {
               !deletedCatSet.has(c.slug.toLowerCase().trim()) &&
               !deletedCatSet.has(c.name.toLowerCase().trim())
           );
-        localDb.categories = mappedCategories;
+
+        const categoryMap = new Map<string, any>();
+        for (const rc of remoteCategories) {
+          categoryMap.set(rc.id, rc);
+        }
+
+        // Preserve any active local categories that are not tombstoned
+        for (const lc of localDb.categories || []) {
+          const idKey = (lc.id || '').toLowerCase().trim();
+          const slugKey = (lc.slug || '').toLowerCase().trim();
+          const nameKey = (lc.name || '').toLowerCase().trim();
+          if (deletedCatSet.has(idKey) || deletedCatSet.has(slugKey) || deletedCatSet.has(nameKey)) {
+            continue;
+          }
+          if (!categoryMap.has(lc.id)) {
+            categoryMap.set(lc.id, lc);
+          }
+        }
+
+        localDb.categories = Array.from(categoryMap.values());
       }
     } catch {
       // Fall back to local DB if Supabase tables are not yet created or unreachable
@@ -722,59 +778,77 @@ export async function saveDb(data: DatabaseSchema): Promise<DatabaseSchema> {
           );
 
           if (activeCategories.length > 0) {
-            await client.from('categories').upsert(
-              activeCategories.map((c) => ({
-                id: c.id,
-                name: c.name,
-                slug: c.slug,
-                description: c.description,
-                image: c.image,
-                created_at: c.createdAt,
-              })),
-              { onConflict: 'id' }
-            );
+            try {
+              const { error: catErr } = await client.from('categories').upsert(
+                activeCategories.map((c) => ({
+                  id: c.id,
+                  name: c.name,
+                  slug: c.slug,
+                  description: c.description,
+                  image: c.image,
+                  created_at: c.createdAt,
+                })),
+                { onConflict: 'id' }
+              );
+              if (catErr) {
+                console.warn('[SUPABASE] Category upsert notice:', catErr.message);
+              }
+            } catch (err: any) {
+              console.warn('[SUPABASE] Category upsert network notice:', err?.message || err);
+            }
           }
 
           // Sync products (excluding any tombstoned deleted products)
-          const deletedProdSet = new Set(data.deletedProductIds || []);
+          const deletedProdSet = new Set(
+            (data.deletedProductIds || []).map((x) => x.toLowerCase().trim())
+          );
           const activeProducts = (data.products || []).filter(
-            (p) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug)
+            (p) =>
+              !deletedProdSet.has((p.id || '').toLowerCase().trim()) &&
+              !deletedProdSet.has((p.slug || '').toLowerCase().trim())
           );
 
           if (activeProducts.length > 0) {
-            await client.from('products').upsert(
-              activeProducts.map((p) => ({
-                id: p.id,
-                title: p.title,
-                slug: p.slug,
-                category: p.category,
-                description: p.description,
-                preview_images: p.previewImages,
-                jpg_storage_key: p.jpgStorageKey,
-                jpg_file_name: p.jpgFileName,
-                jpg_price: p.jpgPrice,
-                old_price: p.oldPrice,
-                has_psd: p.hasPsd,
-                psd_storage_key: p.psdStorageKey,
-                psd_file_name: p.psdFileName,
-                psd_upgrade_price: p.psdUpgradePrice,
-                dimensions: p.dimensions,
-                compatibility: p.compatibility,
-                usage_rights: p.usageRights,
-                whats_included: p.whatsIncluded,
-                tags: p.tags,
-                featured: p.featured,
-                bestseller: p.bestseller,
-                is_new: p.new,
-                limited: p.limited,
-                seo_title: p.seoTitle,
-                seo_description: p.seoDescription,
-                is_published: p.isPublished !== false,
-                created_at: p.createdAt,
-                updated_at: p.updatedAt,
-              })),
-              { onConflict: 'id' }
-            );
+            try {
+              const { error: prodErr } = await client.from('products').upsert(
+                activeProducts.map((p) => ({
+                  id: p.id,
+                  title: p.title,
+                  slug: p.slug,
+                  category: p.category,
+                  description: p.description,
+                  preview_images: p.previewImages,
+                  jpg_storage_key: p.jpgStorageKey,
+                  jpg_file_name: p.jpgFileName,
+                  jpg_price: p.jpgPrice,
+                  old_price: p.oldPrice,
+                  has_psd: p.hasPsd,
+                  psd_storage_key: p.psdStorageKey,
+                  psd_file_name: p.psdFileName,
+                  psd_upgrade_price: p.psdUpgradePrice,
+                  dimensions: p.dimensions,
+                  compatibility: p.compatibility,
+                  usage_rights: p.usageRights,
+                  whats_included: p.whatsIncluded,
+                  tags: p.tags,
+                  featured: p.featured,
+                  bestseller: p.bestseller,
+                  is_new: p.new,
+                  limited: p.limited,
+                  seo_title: p.seoTitle,
+                  seo_description: p.seoDescription,
+                  is_published: p.isPublished !== false,
+                  created_at: p.createdAt,
+                  updated_at: p.updatedAt,
+                })),
+                { onConflict: 'id' }
+              );
+              if (prodErr) {
+                console.warn('[SUPABASE] Product upsert notice:', prodErr.message);
+              }
+            } catch (err: any) {
+              console.warn('[SUPABASE] Product upsert network notice:', err?.message || err);
+            }
           }
 
           // Sync orders

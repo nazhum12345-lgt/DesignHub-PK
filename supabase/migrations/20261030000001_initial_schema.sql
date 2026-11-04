@@ -190,14 +190,23 @@ ALTER TABLE public.coupons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.homepage_config ENABLE ROW LEVEL SECURITY;
 
 -- Categories Policies
+-- Public storefront visitors can read all categories
 CREATE POLICY "Public can view categories"
   ON public.categories FOR SELECT
+  TO public
   USING (true);
 
--- Products Policies (Public can only view published products)
+-- Products Policies
+-- Public storefront visitors can only read published products
 CREATE POLICY "Public can view published products"
   ON public.products FOR SELECT
+  TO public
   USING (is_published = true);
+
+-- SECURITY SPECIFICATION:
+-- Products and Categories mutations (INSERT, UPDATE, DELETE) are intentionally NOT granted to 'anon' or 'public'.
+-- In Supabase, server-side admin operations use the service-role key (SUPABASE_SERVICE_ROLE_KEY), which automatically bypasses RLS.
+-- This guarantees that unauthenticated public users cannot modify, tamper with, or delete products and categories directly via the Supabase REST API.
 
 -- Customer Profiles Policies (Users can only access their own profile)
 CREATE POLICY "Users can view own profile"
@@ -216,9 +225,13 @@ CREATE POLICY "Users can insert own profile"
   WITH CHECK (auth.uid() = id);
 
 -- Orders Policies (Customers create orders, users view their own orders)
+-- Enforces that anonymous clients can never set payment_status to 'PAID' or 'Processing'
 CREATE POLICY "Anyone can create orders"
   ON public.orders FOR INSERT
-  WITH CHECK (true);
+  TO public
+  WITH CHECK (
+    payment_status = 'Payment Verification Pending'
+  );
 
 CREATE POLICY "Users can view own orders"
   ON public.orders FOR SELECT
