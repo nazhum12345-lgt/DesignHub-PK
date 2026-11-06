@@ -25,24 +25,7 @@
   ],
   "downloads": [],
   "adminEmail": "baigrahim12345@gmail.com",
-  "categories": [
-    {
-      "id": "cat_social_media",
-      "name": "Social Media",
-      "slug": "social-media",
-      "description": "Social media design templates",
-      "image": "/src/assets/images/velora_social_studio_clean_1790691323998.jpg",
-      "createdAt": "2026-10-31T19:52:26.322612+00:00"
-    },
-    {
-      "id": "cat_printables",
-      "name": "Printables",
-      "slug": "printables",
-      "description": "Printable digital designs",
-      "image": "/src/assets/images/velora_printables_studio_clean_1790691336397.jpg",
-      "createdAt": "2026-10-31T19:52:26.322612+00:00"
-    }
-  ],
+  "categories": [],
   "homepageConfig": {
     "currencyCode": "PKR",
     "promoSubtext": "Explore premium digital assets created for modern creators, businesses, and brands.",

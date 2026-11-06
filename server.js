@@ -31,14 +31,17 @@ var SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 
 var SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Yz4NZvZ2vl6Yi1MoYH1kgA_g-HX1d54";
 var SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 var supabaseClient = null;
+var currentClientKey = "";
 function getSupabaseServerClient() {
-  if (supabaseClient) return supabaseClient;
-  const key = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY;
+  const key = serviceKey || SUPABASE_ANON_KEY;
   if (!SUPABASE_URL || !key) return null;
+  if (supabaseClient && currentClientKey === key) return supabaseClient;
   try {
     supabaseClient = createClient(SUPABASE_URL, key, {
       auth: { persistSession: false }
     });
+    currentClientKey = key;
     return supabaseClient;
   } catch (err) {
     console.warn("[SUPABASE] Server client initialization error:", err);
@@ -52,32 +55,7 @@ var TMP_DB_FILE = path2.join(TMP_DATA_DIR, "velora-db.json");
 var FILES_DB_FILE = path2.join(DATA_DIR, "velora-files.json");
 var TMP_FILES_DB_FILE = path2.join(TMP_DATA_DIR, "velora-files.json");
 var writeQueuePromise = Promise.resolve();
-var INITIAL_CATEGORIES = [
-  {
-    id: "cat_social_media",
-    name: "Social Media",
-    slug: "social-media",
-    description: "Editorial Instagram post templates, story packs, and high-converting carousel designs.",
-    image: "/src/assets/images/velora_cat_social_media_1790670021007.jpg",
-    createdAt: "2026-10-01T00:00:00.000Z"
-  },
-  {
-    id: "cat_printables",
-    name: "Printables",
-    slug: "printables",
-    description: "Fine art wedding suites, stationery paper goods, and museum-grade printable artboards.",
-    image: "/src/assets/images/velora_cat_printables_1790670036140.jpg",
-    createdAt: "2026-10-01T00:00:00.000Z"
-  },
-  {
-    id: "cat_logos",
-    name: "Logos",
-    slug: "logos",
-    description: "Minimalist monograms, bespoke emblems, and timeless brand identity kits.",
-    image: "/src/assets/images/velora_cat_logos_1790670048012.jpg",
-    createdAt: "2026-10-01T00:00:00.000Z"
-  }
-];
+var INITIAL_CATEGORIES = [];
 var INITIAL_DATABASE = {
   adminEmail: "baigrahim12345@gmail.com",
   adminPasswordHash: "pbkdf2:10000:d32b3747b7c9ff0b218ed72a8a897f6d:e77cc2be277d5753992696e8fe03cde9eaea2360f0f5f1b68f1b8c6bd283c0a6",
@@ -118,7 +96,7 @@ function cleanTestData(data) {
   if (Array.isArray(data.products)) {
     const originalCount = data.products.length;
     data.products = data.products.filter((p) => {
-      const isTest = p.id.toLowerCase().includes("test") || p.title.toLowerCase().includes("automated test") || p.title.toLowerCase().includes("temporary verification") || p.slug.toLowerCase().includes("temp-test") || p.jpgStorageKey === "demo_aurelia_arch.jpg" || p.jpgStorageKey === "sample.jpg";
+      const isTest = p.id === "probe_test_synthetic_health_check" || p.id === "automated_test_probe_record" || p.title === "__automated_synthetic_probe__" || p.title === "Temporary Verification Probe";
       return !isTest;
     });
     if (data.products.length !== originalCount) changed = true;
@@ -289,90 +267,114 @@ async function isDatabaseConnected() {
   };
 }
 var lastSupabaseSyncAttempt = 0;
-async function ensureDbLoaded() {
+var syncInFlightPromise = null;
+function formatSupabaseError(err, entity) {
+  if (!err) return `Unknown Supabase ${entity} error.`;
+  const msg = String(err.message || err);
+  if (err.code === "42501" || msg.toLowerCase().includes("row-level security")) {
+    return `Supabase permission denied (RLS) for ${entity}. Ensure SUPABASE_SERVICE_ROLE_KEY is configured in server environment variables.`;
+  }
+  if (err.code === "23505") {
+    return `A ${entity} with this name or slug already exists in Supabase.`;
+  }
+  return `Supabase ${entity} error: ${msg}`;
+}
+async function ensureDbLoaded(forceRefresh = false) {
   const now = Date.now();
-  if (dbCache && now - lastSupabaseSyncAttempt < 3e4) {
+  if (!forceRefresh && dbCache && now - lastSupabaseSyncAttempt < 1e4) {
     return dbCache;
   }
-  const localDb = dbCache || loadLocalFileDb();
-  lastSupabaseSyncAttempt = now;
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const fetchPromise = Promise.all([
-        client.from("products").select("*"),
-        client.from("categories").select("*")
-      ]);
-      const timeoutPromise = new Promise(
-        (resolve) => setTimeout(
-          () => resolve([
-            { data: null, error: { message: "Supabase sync timeout" } },
-            { data: null, error: { message: "Supabase sync timeout" } }
-          ]),
-          800
-        )
-      );
-      const [prodRes, catRes] = await Promise.race([fetchPromise, timeoutPromise]);
-      const supaProducts = prodRes?.data;
-      const prodErr = prodRes?.error;
-      const supaCategories = catRes?.data;
-      const catErr = catRes?.error;
-      if (!prodErr && Array.isArray(supaProducts)) {
-        const deletedProdSet = new Set(localDb.deletedProductIds || []);
-        const mappedProducts = supaProducts.map((row) => ({
-          id: row.id,
-          title: row.title,
-          slug: row.slug,
-          category: row.category,
-          description: row.description || "",
-          previewImages: row.preview_images || [],
-          jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
-          jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
-          jpgPrice: Number(row.jpg_price || 0),
-          oldPrice: row.old_price ? Number(row.old_price) : null,
-          hasPsd: Boolean(row.has_psd),
-          psdStorageKey: row.psd_storage_key || void 0,
-          psdFileName: row.psd_file_name || void 0,
-          psdUpgradePrice: row.psd_upgrade_price ? Number(row.psd_upgrade_price) : null,
-          dimensions: row.dimensions || "",
-          compatibility: row.compatibility || "",
-          usageRights: row.usage_rights || "",
-          whatsIncluded: row.whats_included || [],
-          tags: row.tags || [],
-          featured: Boolean(row.featured),
-          bestseller: Boolean(row.bestseller),
-          new: Boolean(row.is_new),
-          limited: Boolean(row.limited),
-          seoTitle: row.seo_title,
-          seoDescription: row.seo_description,
-          isPublished: row.is_published !== false,
-          createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString(),
-          updatedAt: row.updated_at || (/* @__PURE__ */ new Date()).toISOString()
-        })).filter((p) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug));
-        localDb.products = mappedProducts;
-      }
-      if (!catErr && Array.isArray(supaCategories)) {
-        const deletedCatSet = new Set(
-          (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
-        );
-        const mappedCategories = supaCategories.map((row) => ({
-          id: row.id,
-          name: row.name,
-          slug: row.slug,
-          description: row.description || "",
-          image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
-          createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString()
-        })).filter(
-          (c) => !deletedCatSet.has(c.id.toLowerCase().trim()) && !deletedCatSet.has(c.slug.toLowerCase().trim()) && !deletedCatSet.has(c.name.toLowerCase().trim())
-        );
-        localDb.categories = mappedCategories;
-      }
-    } catch {
-    }
+  if (syncInFlightPromise) {
+    return syncInFlightPromise;
   }
-  dbCache = localDb;
-  normalizeSchemaArrays(localDb);
-  return localDb;
+  syncInFlightPromise = (async () => {
+    const localDb = dbCache || loadLocalFileDb();
+    lastSupabaseSyncAttempt = Date.now();
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        const fetchPromise = Promise.all([
+          client.from("products").select("*").order("created_at", { ascending: false }),
+          client.from("categories").select("*").order("created_at", { ascending: true })
+        ]);
+        const timeoutPromise = new Promise(
+          (resolve) => setTimeout(
+            () => resolve([
+              { data: null, error: { message: "Supabase sync timeout" } },
+              { data: null, error: { message: "Supabase sync timeout" } }
+            ]),
+            5e3
+          )
+        );
+        const [prodRes, catRes] = await Promise.race([fetchPromise, timeoutPromise]);
+        const supaProducts = prodRes?.data;
+        const prodErr = prodRes?.error;
+        const supaCategories = catRes?.data;
+        const catErr = catRes?.error;
+        if (!prodErr && Array.isArray(supaProducts)) {
+          const deletedProdSet = new Set(
+            (localDb.deletedProductIds || []).map((x) => x.toLowerCase().trim())
+          );
+          localDb.products = supaProducts.map((row) => ({
+            id: row.id,
+            title: row.title,
+            slug: row.slug,
+            category: row.category,
+            description: row.description || "",
+            previewImages: Array.isArray(row.preview_images) ? row.preview_images : [],
+            jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
+            jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
+            jpgPrice: Number(row.jpg_price || 0),
+            oldPrice: row.old_price ? Number(row.old_price) : null,
+            hasPsd: Boolean(row.has_psd),
+            psdStorageKey: row.psd_storage_key || void 0,
+            psdFileName: row.psd_file_name || void 0,
+            psdUpgradePrice: row.psd_upgrade_price ? Number(row.psd_upgrade_price) : null,
+            dimensions: row.dimensions || "",
+            compatibility: row.compatibility || "",
+            usageRights: row.usage_rights || "",
+            whatsIncluded: Array.isArray(row.whats_included) ? row.whats_included : [],
+            tags: Array.isArray(row.tags) ? row.tags : [],
+            featured: Boolean(row.featured),
+            bestseller: Boolean(row.bestseller),
+            new: Boolean(row.is_new),
+            limited: Boolean(row.limited),
+            seoTitle: row.seo_title,
+            seoDescription: row.seo_description,
+            isPublished: row.is_published !== false,
+            createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString(),
+            updatedAt: row.updated_at || (/* @__PURE__ */ new Date()).toISOString()
+          })).filter(
+            (p) => !deletedProdSet.has((p.id || "").toLowerCase().trim()) && !deletedProdSet.has((p.slug || "").toLowerCase().trim())
+          );
+        }
+        if (!catErr && Array.isArray(supaCategories)) {
+          const deletedCatSet = new Set(
+            (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
+          );
+          localDb.categories = supaCategories.map((row) => ({
+            id: row.id,
+            name: row.name,
+            slug: row.slug,
+            description: row.description || "",
+            image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
+            createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString()
+          })).filter(
+            (c) => !deletedCatSet.has(c.id.toLowerCase().trim()) && !deletedCatSet.has(c.slug.toLowerCase().trim()) && !deletedCatSet.has(c.name.toLowerCase().trim())
+          );
+        }
+      } catch {
+      }
+    }
+    dbCache = localDb;
+    normalizeSchemaArrays(localDb);
+    return localDb;
+  })();
+  try {
+    return await syncInFlightPromise;
+  } finally {
+    syncInFlightPromise = null;
+  }
 }
 function loadDb() {
   if (dbCache) {
@@ -381,9 +383,13 @@ function loadDb() {
   }
   return loadLocalFileDb();
 }
-async function saveDb(data) {
+async function saveLocalCacheOnly(data) {
   normalizeSchemaArrays(data);
   dbCache = data;
+  lastSupabaseSyncAttempt = Date.now();
+  if (process.env.VERCEL) {
+    return data;
+  }
   writeQueuePromise = writeQueuePromise.then(async () => {
     const serialized = JSON.stringify(data, null, 2);
     try {
@@ -394,75 +400,118 @@ async function saveDb(data) {
       fs.writeFileSync(tempPath, serialized, "utf-8");
       fs.renameSync(tempPath, DB_FILE);
     } catch {
+    }
+  }).catch((err) => {
+    console.error("[DESIGNHUB DB] Local cache write error:", err);
+  });
+  await writeQueuePromise;
+  return data;
+}
+async function saveDb(data) {
+  normalizeSchemaArrays(data);
+  dbCache = data;
+  writeQueuePromise = writeQueuePromise.then(async () => {
+    const serialized = JSON.stringify(data, null, 2);
+    if (!process.env.VERCEL) {
       try {
-        if (!fs.existsSync(TMP_DATA_DIR)) {
-          fs.mkdirSync(TMP_DATA_DIR, { recursive: true });
+        if (!fs.existsSync(DATA_DIR)) {
+          fs.mkdirSync(DATA_DIR, { recursive: true });
         }
-        const tmpTemp = `${TMP_DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
-        fs.writeFileSync(tmpTemp, serialized, "utf-8");
-        fs.renameSync(tmpTemp, TMP_DB_FILE);
-      } catch (tmpErr) {
-        console.warn("[DESIGNHUB DB] Warning writing /tmp file:", tmpErr);
+        const tempPath = `${DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+        fs.writeFileSync(tempPath, serialized, "utf-8");
+        fs.renameSync(tempPath, DB_FILE);
+      } catch {
+        try {
+          if (!fs.existsSync(TMP_DATA_DIR)) {
+            fs.mkdirSync(TMP_DATA_DIR, { recursive: true });
+          }
+          const tmpTemp = `${TMP_DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+          fs.writeFileSync(tmpTemp, serialized, "utf-8");
+          fs.renameSync(tmpTemp, TMP_DB_FILE);
+        } catch (tmpErr) {
+          console.warn("[DESIGNHUB DB] Warning writing /tmp file:", tmpErr);
+        }
       }
     }
     const client = getSupabaseServerClient();
     if (client) {
       try {
-        const deletedCatSet = new Set(data.deletedCategoryIds || []);
-        const activeCategories = (data.categories || []).filter(
-          (c) => !deletedCatSet.has(c.id) && !deletedCatSet.has(c.slug)
+        const deletedCatSet = new Set(
+          (data.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
         );
+        const activeCategories = (data.categories || []).filter((c) => {
+          const id = (c.id || "").toLowerCase().trim();
+          const slug = (c.slug || "").toLowerCase().trim();
+          const name = (c.name || "").toLowerCase().trim();
+          return !deletedCatSet.has(id) && !deletedCatSet.has(slug) && !deletedCatSet.has(name);
+        });
         if (activeCategories.length > 0) {
-          await client.from("categories").upsert(
-            activeCategories.map((c) => ({
-              id: c.id,
-              name: c.name,
-              slug: c.slug,
-              description: c.description,
-              image: c.image,
-              created_at: c.createdAt
-            })),
-            { onConflict: "id" }
-          );
+          try {
+            const { error: catErr } = await client.from("categories").upsert(
+              activeCategories.map((c) => ({
+                id: c.id,
+                name: c.name,
+                slug: c.slug,
+                description: c.description,
+                image: c.image,
+                created_at: c.createdAt
+              })),
+              { onConflict: "id" }
+            );
+            if (catErr) {
+              console.warn("[SUPABASE] Category upsert notice:", catErr.message);
+            }
+          } catch (err) {
+            console.warn("[SUPABASE] Category upsert network notice:", err?.message || err);
+          }
         }
-        const deletedProdSet = new Set(data.deletedProductIds || []);
+        const deletedProdSet = new Set(
+          (data.deletedProductIds || []).map((x) => x.toLowerCase().trim())
+        );
         const activeProducts = (data.products || []).filter(
-          (p) => !deletedProdSet.has(p.id) && !deletedProdSet.has(p.slug)
+          (p) => !deletedProdSet.has((p.id || "").toLowerCase().trim()) && !deletedProdSet.has((p.slug || "").toLowerCase().trim())
         );
         if (activeProducts.length > 0) {
-          await client.from("products").upsert(
-            activeProducts.map((p) => ({
-              id: p.id,
-              title: p.title,
-              slug: p.slug,
-              category: p.category,
-              description: p.description,
-              preview_images: p.previewImages,
-              jpg_storage_key: p.jpgStorageKey,
-              jpg_file_name: p.jpgFileName,
-              jpg_price: p.jpgPrice,
-              old_price: p.oldPrice,
-              has_psd: p.hasPsd,
-              psd_storage_key: p.psdStorageKey,
-              psd_file_name: p.psdFileName,
-              psd_upgrade_price: p.psdUpgradePrice,
-              dimensions: p.dimensions,
-              compatibility: p.compatibility,
-              usage_rights: p.usageRights,
-              whats_included: p.whatsIncluded,
-              tags: p.tags,
-              featured: p.featured,
-              bestseller: p.bestseller,
-              is_new: p.new,
-              limited: p.limited,
-              seo_title: p.seoTitle,
-              seo_description: p.seoDescription,
-              is_published: p.isPublished !== false,
-              created_at: p.createdAt,
-              updated_at: p.updatedAt
-            })),
-            { onConflict: "id" }
-          );
+          try {
+            const { error: prodErr } = await client.from("products").upsert(
+              activeProducts.map((p) => ({
+                id: p.id,
+                title: p.title,
+                slug: p.slug,
+                category: p.category,
+                description: p.description,
+                preview_images: p.previewImages,
+                jpg_storage_key: p.jpgStorageKey,
+                jpg_file_name: p.jpgFileName,
+                jpg_price: p.jpgPrice,
+                old_price: p.oldPrice,
+                has_psd: p.hasPsd,
+                psd_storage_key: p.psdStorageKey,
+                psd_file_name: p.psdFileName,
+                psd_upgrade_price: p.psdUpgradePrice,
+                dimensions: p.dimensions,
+                compatibility: p.compatibility,
+                usage_rights: p.usageRights,
+                whats_included: p.whatsIncluded,
+                tags: p.tags,
+                featured: p.featured,
+                bestseller: p.bestseller,
+                is_new: p.new,
+                limited: p.limited,
+                seo_title: p.seoTitle,
+                seo_description: p.seoDescription,
+                is_published: p.isPublished !== false,
+                created_at: p.createdAt,
+                updated_at: p.updatedAt
+              })),
+              { onConflict: "id" }
+            );
+            if (prodErr) {
+              console.warn("[SUPABASE] Product upsert notice:", prodErr.message);
+            }
+          } catch (err) {
+            console.warn("[SUPABASE] Product upsert network notice:", err?.message || err);
+          }
         }
         if (data.orders && data.orders.length > 0) {
           await client.from("orders").upsert(
@@ -803,14 +852,6 @@ app.use((req, _res, next) => {
     if (knownApiPrefixes.some((p) => cleanPath === p || cleanPath.startsWith(p + "/"))) {
       req.url = "/api" + req.url;
     }
-  }
-  next();
-});
-app.use("/api", async (_req, _res, next) => {
-  try {
-    await ensureDbLoaded();
-  } catch (err) {
-    console.error("[DesignHub PK] Failed to ensure DB state:", err);
   }
   next();
 });
@@ -1202,8 +1243,8 @@ app.get("/api/health", async (_req, res) => {
     }
   });
 });
-app.get("/api/storefront", (_req, res) => {
-  const db = loadDb();
+app.get("/api/storefront", async (_req, res) => {
+  const db = await ensureDbLoaded();
   const deletedCatSet = new Set((db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim()));
   const activeCategories = (db.categories || []).filter(
     (c) => !deletedCatSet.has(c.id.toLowerCase().trim()) && !deletedCatSet.has(c.slug.toLowerCase().trim()) && !deletedCatSet.has(c.name.toLowerCase().trim())
@@ -1218,8 +1259,8 @@ app.get("/api/storefront", (_req, res) => {
     }
   });
 });
-app.get("/api/products/:slugOrId", (req, res) => {
-  const db = loadDb();
+app.get("/api/products/:slugOrId", async (req, res) => {
+  const db = await ensureDbLoaded();
   const { slugOrId } = req.params;
   const product = db.products.find((p) => p.slug === slugOrId || p.id === slugOrId);
   if (!product) {
@@ -1289,7 +1330,8 @@ app.post("/api/orders", async (req, res) => {
     paymentNotes,
     customerName,
     email,
-    phone
+    phone,
+    couponCode
   } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     res.status(400).json({ error: "At least one digital design product is required to place an order." });
@@ -1325,7 +1367,29 @@ app.post("/api/orders", async (req, res) => {
       itemTotal
     });
   }
-  const discount = 0;
+  let discount = 0;
+  let appliedCouponCode = void 0;
+  if (couponCode && typeof couponCode === "string" && couponCode.trim()) {
+    const normalizedCode = couponCode.trim().toUpperCase();
+    const coupon = db.coupons.find((c) => c.code.toUpperCase() === normalizedCode && c.active);
+    if (coupon) {
+      const isExpired = coupon.expiresAt && Date.now() > new Date(coupon.expiresAt).getTime();
+      const isLimitReached = coupon.usageLimit && coupon.usedCount >= coupon.usageLimit;
+      if (!isExpired && !isLimitReached) {
+        let eligibleSubtotal = 0;
+        for (const item of orderItems) {
+          if (coupon.restrictedCategory && item.category !== coupon.restrictedCategory) continue;
+          if (coupon.restrictedProductId && item.productId !== coupon.restrictedProductId) continue;
+          eligibleSubtotal += item.itemTotal;
+        }
+        if (eligibleSubtotal > 0) {
+          discount = coupon.type === "percentage" ? Math.round(eligibleSubtotal * coupon.value / 100) : Math.min(eligibleSubtotal, coupon.value);
+          appliedCouponCode = coupon.code;
+          coupon.usedCount = (coupon.usedCount || 0) + 1;
+        }
+      }
+    }
+  }
   const total = Math.max(0, subtotal - discount);
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const orderId = `VEL-${Date.now().toString().slice(-6)}-${crypto2.randomBytes(2).toString("hex").toUpperCase()}`;
@@ -1347,7 +1411,8 @@ app.post("/api/orders", async (req, res) => {
     billingCity: "",
     items: orderItems,
     subtotal,
-    discount: 0,
+    discount,
+    couponCode: appliedCouponCode,
     total,
     paymentMethod: paymentMethod === "jazzcash" ? "jazzcash" : paymentMethod,
     recipientJazzCashNumber: recipientJazzCashNumber || "03192644717",
@@ -2214,8 +2279,8 @@ app.put("/api/admin/email/confirm", requireAdmin, async (req, res) => {
     message: `Admin login email updated to ${db.adminEmail}.`
   });
 });
-app.get("/api/admin/dashboard", requireAdmin, (_req, res) => {
-  const db = loadDb();
+app.get("/api/admin/dashboard", requireAdmin, async (_req, res) => {
+  const db = await ensureDbLoaded(true);
   const paidOrders = db.orders.filter((o) => o.paymentStatus === "Paid" || o.paymentStatus === "PAID");
   const revenue = paidOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
   const totalDownloadsCompleted = db.downloads.reduce((sum, d) => sum + d.downloadCount, 0);
@@ -2361,11 +2426,36 @@ app.post("/api/admin/products", requireAdmin, async (req, res) => {
   const id = `prod_${crypto2.randomBytes(6).toString("hex")}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const validPreviews = Array.isArray(previewImages) && previewImages.filter(Boolean).length > 0 ? previewImages.filter(Boolean) : ["/src/assets/images/velora_hero_editorial_1790670008130.jpg"];
+  let savedPreviewUrl = validPreviews[0];
+  if (savedPreviewUrl?.startsWith("data:image/")) {
+    try {
+      const uploadDir = path4.resolve(process.cwd(), "public", "assets", "images");
+      if (!fs3.existsSync(uploadDir)) {
+        fs3.mkdirSync(uploadDir, { recursive: true });
+      }
+      const match = savedPreviewUrl.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+      if (match) {
+        const ext = match[1] === "jpeg" ? "jpg" : match[1];
+        const previewFileName = `${id}_preview.${ext}`;
+        const previewFilePath = path4.join(uploadDir, previewFileName);
+        const buf = Buffer.from(match[2], "base64");
+        fs3.writeFileSync(previewFilePath, buf);
+        const distImgDir = path4.resolve(process.cwd(), "dist", "assets", "images");
+        if (fs3.existsSync(distImgDir)) {
+          fs3.writeFileSync(path4.join(distImgDir, previewFileName), buf);
+        }
+        savedPreviewUrl = `/assets/images/${previewFileName}`;
+      }
+    } catch (imgErr) {
+      console.warn("[IMAGE SAVE] Could not write preview to file, preserving data URL:", imgErr);
+    }
+  }
+  const finalPreviews = [savedPreviewUrl, ...validPreviews.slice(1)];
   const jpgStorageKey = `${id}_standard.jpg`;
   saveProtectedDigitalFile(
     jpgStorageKey,
     jpgFileDataUrl,
-    validPreviews[0],
+    finalPreviews[0],
     "JPG",
     title.trim()
   );
@@ -2380,7 +2470,7 @@ app.post("/api/admin/products", requireAdmin, async (req, res) => {
     slug: cleanSlug,
     category: category?.trim() || "Social Media",
     description: description?.trim() || "",
-    previewImages: validPreviews,
+    previewImages: finalPreviews,
     jpgStorageKey,
     jpgFileName: jpgFileName?.trim() || `${cleanSlug}-velora.jpg`,
     jpgPrice: Number(jpgPrice),
@@ -2407,16 +2497,58 @@ app.post("/api/admin/products", requireAdmin, async (req, res) => {
     limited: Boolean(limited),
     seoTitle: seoTitle?.trim() || `${title.trim()} \u2014 VELORA Digital Design`,
     seoDescription: seoDescription?.trim() || description?.trim() || "",
+    isPublished: true,
     createdAt: now,
     updatedAt: now
   };
+  const client = getSupabaseServerClient();
+  if (!client) {
+    res.status(500).json({ error: "Supabase client is not configured on the server." });
+    return;
+  }
+  const { data: insertedProd, error: prodInsertErr } = await client.from("products").insert({
+    id: product.id,
+    title: product.title,
+    slug: product.slug,
+    category: product.category,
+    description: product.description,
+    preview_images: product.previewImages,
+    jpg_storage_key: product.jpgStorageKey,
+    jpg_file_name: product.jpgFileName,
+    jpg_price: product.jpgPrice,
+    old_price: product.oldPrice,
+    has_psd: product.hasPsd,
+    psd_storage_key: product.psdStorageKey,
+    psd_file_name: product.psdFileName,
+    psd_upgrade_price: product.psdUpgradePrice,
+    dimensions: product.dimensions,
+    compatibility: product.compatibility,
+    usage_rights: product.usageRights,
+    whats_included: product.whatsIncluded,
+    tags: product.tags,
+    featured: product.featured,
+    bestseller: product.bestseller,
+    is_new: product.new,
+    limited: product.limited,
+    seo_title: product.seoTitle,
+    seo_description: product.seoDescription,
+    is_published: true,
+    created_at: product.createdAt,
+    updated_at: product.updatedAt
+  }).select().single();
+  if (prodInsertErr || !insertedProd) {
+    const status = prodInsertErr?.code === "42501" ? 403 : prodInsertErr?.code === "23505" ? 409 : 500;
+    res.status(status).json({ error: formatSupabaseError(prodInsertErr, "product") });
+    return;
+  }
   if (Array.isArray(db.deletedProductIds)) {
     db.deletedProductIds = db.deletedProductIds.filter(
       (pId) => pId !== product.id && pId !== product.slug
     );
   }
   db.products.unshift(product);
-  await saveDb(db);
+  await saveLocalCacheOnly(db);
+  console.info(`[DesignHub PK Product] Successfully created product "${product.title}" (${product.id}) in Supabase.`);
   res.status(201).json({ product: sanitizeProductForPublic(product) });
 });
 app.put("/api/admin/products/:id", requireAdmin, async (req, res) => {
@@ -2460,7 +2592,32 @@ app.put("/api/admin/products/:id", requireAdmin, async (req, res) => {
   if (category !== void 0) product.category = category.trim();
   if (description !== void 0) product.description = description.trim();
   if (Array.isArray(previewImages) && previewImages.filter(Boolean).length > 0) {
-    product.previewImages = previewImages.filter(Boolean);
+    const rawPreviews = previewImages.filter(Boolean);
+    let savedPreviewUrl = rawPreviews[0];
+    if (savedPreviewUrl?.startsWith("data:image/")) {
+      try {
+        const uploadDir = path4.resolve(process.cwd(), "public", "assets", "images");
+        if (!fs3.existsSync(uploadDir)) {
+          fs3.mkdirSync(uploadDir, { recursive: true });
+        }
+        const match = savedPreviewUrl.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+        if (match) {
+          const ext = match[1] === "jpeg" ? "jpg" : match[1];
+          const previewFileName = `${product.id}_preview.${ext}`;
+          const previewFilePath = path4.join(uploadDir, previewFileName);
+          const buf = Buffer.from(match[2], "base64");
+          fs3.writeFileSync(previewFilePath, buf);
+          const distImgDir = path4.resolve(process.cwd(), "dist", "assets", "images");
+          if (fs3.existsSync(distImgDir)) {
+            fs3.writeFileSync(path4.join(distImgDir, previewFileName), buf);
+          }
+          savedPreviewUrl = `/assets/images/${previewFileName}`;
+        }
+      } catch (imgErr) {
+        console.warn("[IMAGE SAVE] Could not write preview to file, preserving data URL:", imgErr);
+      }
+    }
+    product.previewImages = [savedPreviewUrl, ...rawPreviews.slice(1)];
   }
   if (jpgPrice !== void 0) product.jpgPrice = Number(jpgPrice);
   if (oldPrice !== void 0) product.oldPrice = oldPrice ? Number(oldPrice) : null;
@@ -2506,19 +2663,57 @@ app.put("/api/admin/products/:id", requireAdmin, async (req, res) => {
   if (limited !== void 0) product.limited = Boolean(limited);
   if (seoTitle !== void 0) product.seoTitle = seoTitle.trim();
   if (seoDescription !== void 0) product.seoDescription = seoDescription.trim();
+  product.isPublished = true;
   product.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = getSupabaseServerClient();
+  if (!client) {
+    res.status(500).json({ error: "Supabase client is not configured on the server." });
+    return;
+  }
+  const { data: updatedProd, error: prodUpdateErr } = await client.from("products").update({
+    title: product.title,
+    slug: product.slug,
+    category: product.category,
+    description: product.description,
+    preview_images: product.previewImages,
+    jpg_storage_key: product.jpgStorageKey,
+    jpg_file_name: product.jpgFileName,
+    jpg_price: product.jpgPrice,
+    old_price: product.oldPrice,
+    has_psd: product.hasPsd,
+    psd_storage_key: product.psdStorageKey,
+    psd_file_name: product.psdFileName,
+    psd_upgrade_price: product.psdUpgradePrice,
+    dimensions: product.dimensions,
+    compatibility: product.compatibility,
+    usage_rights: product.usageRights,
+    whats_included: product.whatsIncluded,
+    tags: product.tags,
+    featured: product.featured,
+    bestseller: product.bestseller,
+    is_new: product.new,
+    limited: product.limited,
+    seo_title: product.seoTitle,
+    seo_description: product.seoDescription,
+    is_published: true,
+    updated_at: product.updatedAt
+  }).eq("id", product.id).select().single();
+  if (prodUpdateErr || !updatedProd) {
+    const status = prodUpdateErr?.code === "42501" ? 403 : prodUpdateErr?.code === "23505" ? 409 : 500;
+    res.status(status).json({ error: formatSupabaseError(prodUpdateErr, "product") });
+    return;
+  }
   if (Array.isArray(db.deletedProductIds)) {
     db.deletedProductIds = db.deletedProductIds.filter(
       (pId) => pId !== product.id && pId !== product.slug
     );
   }
-  await saveDb(db);
+  await saveLocalCacheOnly(db);
   res.json({ product: sanitizeProductForPublic(product) });
 });
 app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
   try {
-    await ensureDbLoaded();
-    const db = loadDb();
+    const db = await ensureDbLoaded();
     const { id } = req.params;
     const idx = db.products.findIndex((p) => p.id === id || p.slug === id);
     if (idx === -1) {
@@ -2526,6 +2721,17 @@ app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
       return;
     }
     const product = db.products[idx];
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: "Supabase client is not configured on the server." });
+      return;
+    }
+    const { error: delProdErr } = await client.from("products").delete().eq("id", product.id);
+    if (delProdErr) {
+      const status = delProdErr.code === "42501" ? 403 : 500;
+      res.status(status).json({ error: formatSupabaseError(delProdErr, "product") });
+      return;
+    }
     if (!Array.isArray(db.deletedProductIds)) {
       db.deletedProductIds = [];
     }
@@ -2536,93 +2742,218 @@ app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
       db.deletedProductIds.push(product.slug);
     }
     db.products.splice(idx, 1);
-    await saveDb(db);
-    const client = getSupabaseServerClient();
-    if (client) {
-      try {
-        await client.from("products").delete().eq("id", product.id);
-        if (product.slug) {
-          await client.from("products").delete().eq("slug", product.slug);
-        }
-      } catch (err) {
-        console.warn("[DesignHub PK Product Delete] Notice:", err);
-      }
-    }
-    console.info(`[DesignHub PK Product] Product "${product.title}" (${product.id}) permanently deleted.`);
+    await saveLocalCacheOnly(db);
+    console.info(`[DesignHub PK Product] Product "${product.title}" (${product.id}) permanently deleted from Supabase.`);
     res.json({ success: true, deleted: true, productId: product.id });
   } catch (err) {
     res.status(500).json({ error: `Failed to delete product: ${err?.message || "Unknown error"}` });
   }
 });
-app.post("/api/admin/categories", requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const { name, description, image } = req.body;
-  if (!name?.trim()) {
-    res.status(400).json({ error: "Category name is required." });
-    return;
-  }
-  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const newCat = {
-    id: `cat_${crypto2.randomBytes(4).toString("hex")}`,
-    name: name.trim(),
-    slug,
-    description: description?.trim() || "",
-    image: image?.trim() || getCategoryFallbackImage(slug, name.trim()),
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (Array.isArray(db.deletedCategoryIds)) {
-    db.deletedCategoryIds = db.deletedCategoryIds.filter(
-      (dId) => dId !== newCat.id && dId !== newCat.slug && dId !== slug
+app.get("/api/admin/categories", requireAdmin, async (_req, res) => {
+  try {
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: "Supabase client is not configured on the server." });
+      return;
+    }
+    const { data: rows, error } = await client.from("categories").select("*").order("created_at", { ascending: true });
+    if (error) {
+      res.status(500).json({ error: formatSupabaseError(error, "category") });
+      return;
+    }
+    const db = loadDb();
+    const deletedCatSet = new Set(
+      (db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
     );
+    const categories = (rows || []).map((row) => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      description: row.description || "",
+      image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
+      createdAt: row.created_at || (/* @__PURE__ */ new Date()).toISOString()
+    })).filter(
+      (c) => !deletedCatSet.has(c.id.toLowerCase().trim()) && !deletedCatSet.has(c.slug.toLowerCase().trim()) && !deletedCatSet.has(c.name.toLowerCase().trim())
+    );
+    db.categories = categories;
+    await saveLocalCacheOnly(db);
+    res.json({ categories });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to fetch categories: ${err?.message || "Unknown error"}` });
   }
-  db.categories.push(newCat);
-  await saveDb(db);
-  res.status(201).json({ category: newCat });
+});
+app.post("/api/admin/categories", requireAdmin, async (req, res) => {
+  try {
+    const { name, description, image } = req.body;
+    const cleanName = name?.trim() || "";
+    if (!cleanName) {
+      res.status(400).json({ error: "Category name is required." });
+      return;
+    }
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: "Supabase client is not configured on the server." });
+      return;
+    }
+    let slug = cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    if (!slug) {
+      slug = `cat-${crypto2.randomBytes(3).toString("hex")}`;
+    }
+    const { data: existingCats, error: checkErr } = await client.from("categories").select("id, name, slug");
+    if (checkErr) {
+      res.status(500).json({ error: formatSupabaseError(checkErr, "category") });
+      return;
+    }
+    const duplicate = (existingCats || []).find(
+      (c) => (c.name || "").trim().toLowerCase() === cleanName.toLowerCase() || (c.slug || "").trim().toLowerCase() === slug.toLowerCase()
+    );
+    if (duplicate) {
+      res.status(409).json({ error: `Category "${duplicate.name}" already exists.` });
+      return;
+    }
+    const newId = `cat_${crypto2.randomBytes(4).toString("hex")}`;
+    const createdAt = (/* @__PURE__ */ new Date()).toISOString();
+    const finalImage = image?.trim() || getCategoryFallbackImage(slug, cleanName);
+    const { data: insertedRow, error: insertErr } = await client.from("categories").insert({
+      id: newId,
+      name: cleanName,
+      slug,
+      description: description?.trim() || "",
+      image: finalImage,
+      created_at: createdAt
+    }).select().single();
+    if (insertErr || !insertedRow) {
+      const status = insertErr?.code === "42501" ? 403 : insertErr?.code === "23505" ? 409 : 500;
+      res.status(status).json({ error: formatSupabaseError(insertErr, "category") });
+      return;
+    }
+    const savedCat = {
+      id: insertedRow.id,
+      name: insertedRow.name,
+      slug: insertedRow.slug,
+      description: insertedRow.description || "",
+      image: insertedRow.image?.trim() || getCategoryFallbackImage(insertedRow.slug, insertedRow.name),
+      createdAt: insertedRow.created_at || createdAt
+    };
+    const db = loadDb();
+    if (Array.isArray(db.deletedCategoryIds)) {
+      db.deletedCategoryIds = db.deletedCategoryIds.filter(
+        (dId) => dId.toLowerCase() !== savedCat.id.toLowerCase() && dId.toLowerCase() !== savedCat.slug.toLowerCase() && dId.toLowerCase() !== savedCat.name.toLowerCase()
+      );
+    }
+    if (!db.categories.some((c) => c.id === savedCat.id)) {
+      db.categories.push(savedCat);
+    }
+    await saveLocalCacheOnly(db);
+    res.status(201).json({ category: savedCat });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to create category: ${err?.message || "Unknown error"}` });
+  }
 });
 app.put("/api/admin/categories/:id", requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const cat = db.categories.find((c) => c.id === req.params.id);
-  if (!cat) {
-    res.status(404).json({ error: "Category not found." });
-    return;
-  }
-  const { name, description, image } = req.body;
-  if (name?.trim()) {
-    cat.name = name.trim();
-    cat.slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  }
-  if (description !== void 0) cat.description = description.trim();
-  if (image?.trim()) {
-    cat.image = image.trim();
-  } else if (!cat.image) {
-    cat.image = getCategoryFallbackImage(cat.slug, cat.name);
-  }
-  if (Array.isArray(db.deletedCategoryIds)) {
-    db.deletedCategoryIds = db.deletedCategoryIds.filter(
-      (dId) => dId !== cat.id && dId !== cat.slug
+  try {
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: "Supabase client is not configured on the server." });
+      return;
+    }
+    const { id } = req.params;
+    const { data: existing, error: fetchErr } = await client.from("categories").select("*").eq("id", id).maybeSingle();
+    if (fetchErr) {
+      res.status(500).json({ error: formatSupabaseError(fetchErr, "category") });
+      return;
+    }
+    if (!existing) {
+      res.status(404).json({ error: "Category not found." });
+      return;
+    }
+    const { name, description, image } = req.body;
+    const nextName = name?.trim() ? name.trim() : existing.name;
+    let nextSlug = name?.trim() ? name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : existing.slug;
+    if (!nextSlug) {
+      nextSlug = existing.slug || `cat-${crypto2.randomBytes(3).toString("hex")}`;
+    }
+    const { data: allCats, error: listErr } = await client.from("categories").select("id, name, slug");
+    if (listErr) {
+      res.status(500).json({ error: formatSupabaseError(listErr, "category") });
+      return;
+    }
+    const duplicate = (allCats || []).find(
+      (c) => c.id !== existing.id && ((c.name || "").trim().toLowerCase() === nextName.toLowerCase() || (c.slug || "").trim().toLowerCase() === nextSlug.toLowerCase())
     );
+    if (duplicate) {
+      res.status(409).json({ error: `Category "${duplicate.name}" already exists.` });
+      return;
+    }
+    const nextDescription = description !== void 0 ? description.trim() : existing.description || "";
+    const nextImage = image?.trim() ? image.trim() : existing.image?.trim() || getCategoryFallbackImage(nextSlug, nextName);
+    const { data: updatedRow, error: updateErr } = await client.from("categories").update({
+      name: nextName,
+      slug: nextSlug,
+      description: nextDescription,
+      image: nextImage
+    }).eq("id", existing.id).select().single();
+    if (updateErr || !updatedRow) {
+      const status = updateErr?.code === "42501" ? 403 : updateErr?.code === "23505" ? 409 : 500;
+      res.status(status).json({ error: formatSupabaseError(updateErr, "category") });
+      return;
+    }
+    const updatedCat = {
+      id: updatedRow.id,
+      name: updatedRow.name,
+      slug: updatedRow.slug,
+      description: updatedRow.description || "",
+      image: updatedRow.image?.trim() || getCategoryFallbackImage(updatedRow.slug, updatedRow.name),
+      createdAt: updatedRow.created_at || existing.created_at || (/* @__PURE__ */ new Date()).toISOString()
+    };
+    const db = loadDb();
+    const idx = db.categories.findIndex((c) => c.id === updatedCat.id);
+    if (idx >= 0) {
+      db.categories[idx] = updatedCat;
+    } else {
+      db.categories.push(updatedCat);
+    }
+    await saveLocalCacheOnly(db);
+    res.json({ category: updatedCat });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to update category: ${err?.message || "Unknown error"}` });
   }
-  await saveDb(db);
-  res.json({ category: cat });
 });
 app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
   try {
-    await ensureDbLoaded();
-    const db = loadDb();
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: "Supabase client is not configured on the server." });
+      return;
+    }
     const rawId = req.params.id;
     const cleanId = decodeURIComponent(rawId).trim().toLowerCase();
-    const cat = db.categories.find(
-      (c) => c.id.toLowerCase() === cleanId || c.slug.toLowerCase() === cleanId || c.name.toLowerCase() === cleanId || c.id === rawId || c.slug === rawId
+    const { data: allCats, error: fetchErr } = await client.from("categories").select("*");
+    if (fetchErr) {
+      res.status(500).json({ error: formatSupabaseError(fetchErr, "category") });
+      return;
+    }
+    const cat = (allCats || []).find(
+      (c) => (c.id || "").toLowerCase() === cleanId || (c.slug || "").toLowerCase() === cleanId || (c.name || "").toLowerCase() === cleanId || c.id === rawId || c.slug === rawId
     );
+    const db = loadDb();
     if (!cat) {
       if (!Array.isArray(db.deletedCategoryIds)) db.deletedCategoryIds = [];
       if (!db.deletedCategoryIds.includes(cleanId)) db.deletedCategoryIds.push(cleanId);
-      await saveDb(db);
+      db.categories = db.categories.filter(
+        (c) => c.id.toLowerCase() !== cleanId && c.slug.toLowerCase() !== cleanId && c.name.toLowerCase() !== cleanId
+      );
+      await saveLocalCacheOnly(db);
       res.json({ success: true, deleted: true, categoryId: rawId, message: "Category already deleted." });
       return;
     }
-    const associatedProducts = db.products.filter(
-      (p) => p.category && p.category.toLowerCase() === cat.name.toLowerCase() || p.category && p.category.toLowerCase() === cat.slug.toLowerCase() || p.category === cat.id
+    const { data: supaProducts, error: prodErr } = await client.from("products").select("id, title, category");
+    if (prodErr) {
+      res.status(500).json({ error: formatSupabaseError(prodErr, "product") });
+      return;
+    }
+    const associatedProducts = (supaProducts || []).filter(
+      (p) => p.category && p.category.toLowerCase() === (cat.name || "").toLowerCase() || p.category && p.category.toLowerCase() === (cat.slug || "").toLowerCase() || p.category === cat.id
     );
     if (associatedProducts.length > 0) {
       const productTitles = associatedProducts.map((p) => `"${p.title}"`).slice(0, 3).join(", ");
@@ -2631,6 +2962,12 @@ app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
         error: `Cannot delete category "${cat.name}" because it is currently assigned to ${associatedProducts.length} product(s) (${productTitles}${moreCount}). Please reassign or delete these products first.`,
         associatedCount: associatedProducts.length
       });
+      return;
+    }
+    const { error: delErr } = await client.from("categories").delete().eq("id", cat.id);
+    if (delErr) {
+      const status = delErr.code === "42501" ? 403 : 500;
+      res.status(status).json({ error: formatSupabaseError(delErr, "category") });
       return;
     }
     if (!Array.isArray(db.deletedCategoryIds)) {
@@ -2647,21 +2984,10 @@ app.delete("/api/admin/categories/:id", requireAdmin, async (req, res) => {
       }
     }
     db.categories = db.categories.filter(
-      (c) => c.id !== cat.id && c.slug !== cat.slug && c.name.toLowerCase() !== cat.name.toLowerCase() && c.id.toLowerCase() !== cleanId && c.slug.toLowerCase() !== cleanId
+      (c) => c.id !== cat.id && c.slug !== cat.slug && c.name.toLowerCase() !== (cat.name || "").toLowerCase() && c.id.toLowerCase() !== cleanId && c.slug.toLowerCase() !== cleanId
     );
-    await saveDb(db);
-    const client = getSupabaseServerClient();
-    if (client) {
-      try {
-        await client.from("categories").delete().eq("id", cat.id);
-        if (cat.slug) {
-          await client.from("categories").delete().eq("slug", cat.slug);
-        }
-      } catch (supaErr) {
-        console.warn("[DesignHub PK Category] Supabase delete notice (tombstone will enforce deletion):", supaErr);
-      }
-    }
-    console.info(`[DesignHub PK Category] Category "${cat.name}" (${cat.id}) permanently deleted.`);
+    await saveLocalCacheOnly(db);
+    console.info(`[DesignHub PK Category] Category "${cat.name}" (${cat.id}) permanently deleted from Supabase.`);
     res.json({ success: true, deleted: true, categoryId: cat.id });
   } catch (err) {
     console.error("[DesignHub PK Category Delete Exception]:", err);

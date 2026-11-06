@@ -541,168 +541,139 @@ export function getPgPool(): null {
 }
 
 let lastSupabaseSyncAttempt = 0;
+let syncInFlightPromise: Promise<DatabaseSchema> | null = null;
+
+export function formatSupabaseError(err: any, entity: string): string {
+  if (!err) return `Unknown Supabase ${entity} error.`;
+  const msg = String(err.message || err);
+  if (err.code === '42501' || msg.toLowerCase().includes('row-level security')) {
+    return `Supabase permission denied (RLS) for ${entity}. Ensure SUPABASE_SERVICE_ROLE_KEY is configured in server environment variables.`;
+  }
+  if (err.code === '23505') {
+    return `A ${entity} with this name or slug already exists in Supabase.`;
+  }
+  return `Supabase ${entity} error: ${msg}`;
+}
 
 /**
  * Synchronize from Supabase if online, otherwise ensure local database is loaded.
- * Sub-millisecond return if cache is valid; bounded timeout (800ms) on remote queries.
+ * Sub-millisecond return if cache is valid; deduplicates concurrent syncs.
  */
-export async function ensureDbLoaded(): Promise<DatabaseSchema> {
+export async function ensureDbLoaded(forceRefresh = false): Promise<DatabaseSchema> {
   const now = Date.now();
-  if (dbCache && now - lastSupabaseSyncAttempt < 30000) {
+  if (!forceRefresh && dbCache && now - lastSupabaseSyncAttempt < 10000) {
     return dbCache;
   }
 
-  const localDb = dbCache || loadLocalFileDb();
-  lastSupabaseSyncAttempt = now;
-
-  // Attempt to sync from Supabase if connected with strict 800ms timeout
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const fetchPromise = Promise.all([
-        client.from('products').select('*'),
-        client.from('categories').select('*'),
-      ]);
-      const timeoutPromise = new Promise<any>((resolve) =>
-        setTimeout(
-          () =>
-            resolve([
-              { data: null, error: { message: 'Supabase sync timeout' } },
-              { data: null, error: { message: 'Supabase sync timeout' } },
-            ]),
-          800
-        )
-      );
-
-      const [prodRes, catRes]: any = await Promise.race([fetchPromise, timeoutPromise]);
-      const supaProducts = prodRes?.data;
-      const prodErr = prodRes?.error;
-      const supaCategories = catRes?.data;
-      const catErr = catRes?.error;
-
-      if (!prodErr && Array.isArray(supaProducts)) {
-        const deletedProdSet = new Set(
-          (localDb.deletedProductIds || []).map((x) => x.toLowerCase().trim())
-        );
-        // Map Supabase snake_case rows to StoredProduct format
-        const remoteProducts: StoredProduct[] = supaProducts
-          .map((row: any) => ({
-            id: row.id,
-            title: row.title,
-            slug: row.slug,
-            category: row.category,
-            description: row.description || '',
-            previewImages: Array.isArray(row.preview_images) ? row.preview_images : [],
-            jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
-            jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
-            jpgPrice: Number(row.jpg_price || 0),
-            oldPrice: row.old_price ? Number(row.old_price) : null,
-            hasPsd: Boolean(row.has_psd),
-            psdStorageKey: row.psd_storage_key || undefined,
-            psdFileName: row.psd_file_name || undefined,
-            psdUpgradePrice: row.psd_upgrade_price ? Number(row.psd_upgrade_price) : null,
-            dimensions: row.dimensions || '',
-            compatibility: row.compatibility || '',
-            usageRights: row.usage_rights || '',
-            whatsIncluded: Array.isArray(row.whats_included) ? row.whats_included : [],
-            tags: Array.isArray(row.tags) ? row.tags : [],
-            featured: Boolean(row.featured),
-            bestseller: Boolean(row.bestseller),
-            new: Boolean(row.is_new),
-            limited: Boolean(row.limited),
-            seoTitle: row.seo_title,
-            seoDescription: row.seo_description,
-            isPublished: row.is_published !== false,
-            createdAt: row.created_at || new Date().toISOString(),
-            updatedAt: row.updated_at || new Date().toISOString(),
-          }))
-          .filter(
-            (p: StoredProduct) =>
-              !deletedProdSet.has((p.id || '').toLowerCase().trim()) &&
-              !deletedProdSet.has((p.slug || '').toLowerCase().trim())
-          );
-
-        // Resilient Product Merge:
-        // 1. Populate productMap with remote products from Supabase
-        const productMap = new Map<string, StoredProduct>();
-        for (const rp of remoteProducts) {
-          productMap.set(rp.id, rp);
-        }
-
-        // 2. Preserve any existing local products that are NOT tombstoned
-        for (const lp of localDb.products || []) {
-          const idKey = (lp.id || '').toLowerCase().trim();
-          const slugKey = (lp.slug || '').toLowerCase().trim();
-          if (deletedProdSet.has(idKey) || deletedProdSet.has(slugKey)) {
-            continue; // Skip tombstoned / deleted products
-          }
-
-          if (productMap.has(lp.id)) {
-            // Both remote and local exist: compare timestamps to keep latest edits
-            const remoteP = productMap.get(lp.id)!;
-            const remoteTime = new Date(remoteP.updatedAt || 0).getTime();
-            const localTime = new Date(lp.updatedAt || 0).getTime();
-            if (localTime >= remoteTime) {
-              productMap.set(lp.id, { ...remoteP, ...lp });
-            }
-          } else {
-            // Local product not yet in Supabase (or RLS-protected) — NEVER DISCARD!
-            productMap.set(lp.id, lp);
-          }
-        }
-
-        localDb.products = Array.from(productMap.values());
-      }
-
-      if (!catErr && Array.isArray(supaCategories)) {
-        const deletedCatSet = new Set(
-          (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
-        );
-        // Map Supabase categories to StoredCategory format authoritatively
-        const remoteCategories = supaCategories
-          .map((row: any) => ({
-            id: row.id,
-            name: row.name,
-            slug: row.slug,
-            description: row.description || '',
-            image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
-            createdAt: row.created_at || new Date().toISOString(),
-          }))
-          .filter(
-            (c: any) =>
-              !deletedCatSet.has(c.id.toLowerCase().trim()) &&
-              !deletedCatSet.has(c.slug.toLowerCase().trim()) &&
-              !deletedCatSet.has(c.name.toLowerCase().trim())
-          );
-
-        const categoryMap = new Map<string, any>();
-        for (const rc of remoteCategories) {
-          categoryMap.set(rc.id, rc);
-        }
-
-        // Preserve any active local categories that are not tombstoned
-        for (const lc of localDb.categories || []) {
-          const idKey = (lc.id || '').toLowerCase().trim();
-          const slugKey = (lc.slug || '').toLowerCase().trim();
-          const nameKey = (lc.name || '').toLowerCase().trim();
-          if (deletedCatSet.has(idKey) || deletedCatSet.has(slugKey) || deletedCatSet.has(nameKey)) {
-            continue;
-          }
-          if (!categoryMap.has(lc.id)) {
-            categoryMap.set(lc.id, lc);
-          }
-        }
-
-        localDb.categories = Array.from(categoryMap.values());
-      }
-    } catch {
-      // Fall back to local DB if Supabase tables are not yet created or unreachable
-    }
+  if (syncInFlightPromise) {
+    return syncInFlightPromise;
   }
 
-  dbCache = localDb;
-  normalizeSchemaArrays(localDb);
-  return localDb;
+  syncInFlightPromise = (async () => {
+    const localDb = dbCache || loadLocalFileDb();
+    lastSupabaseSyncAttempt = Date.now();
+
+    const client = getSupabaseServerClient();
+    if (client) {
+      try {
+        const fetchPromise = Promise.all([
+          client.from('products').select('*').order('created_at', { ascending: false }),
+          client.from('categories').select('*').order('created_at', { ascending: true }),
+        ]);
+        const timeoutPromise = new Promise<any>((resolve) =>
+          setTimeout(
+            () =>
+              resolve([
+                { data: null, error: { message: 'Supabase sync timeout' } },
+                { data: null, error: { message: 'Supabase sync timeout' } },
+              ]),
+            5000
+          )
+        );
+
+        const [prodRes, catRes]: any = await Promise.race([fetchPromise, timeoutPromise]);
+        const supaProducts = prodRes?.data;
+        const prodErr = prodRes?.error;
+        const supaCategories = catRes?.data;
+        const catErr = catRes?.error;
+
+        if (!prodErr && Array.isArray(supaProducts)) {
+          const deletedProdSet = new Set(
+            (localDb.deletedProductIds || []).map((x) => x.toLowerCase().trim())
+          );
+          localDb.products = supaProducts
+            .map((row: any) => ({
+              id: row.id,
+              title: row.title,
+              slug: row.slug,
+              category: row.category,
+              description: row.description || '',
+              previewImages: Array.isArray(row.preview_images) ? row.preview_images : [],
+              jpgStorageKey: row.jpg_storage_key || `${row.id}_standard.jpg`,
+              jpgFileName: row.jpg_file_name || `${row.title}.jpg`,
+              jpgPrice: Number(row.jpg_price || 0),
+              oldPrice: row.old_price ? Number(row.old_price) : null,
+              hasPsd: Boolean(row.has_psd),
+              psdStorageKey: row.psd_storage_key || undefined,
+              psdFileName: row.psd_file_name || undefined,
+              psdUpgradePrice: row.psd_upgrade_price ? Number(row.psd_upgrade_price) : null,
+              dimensions: row.dimensions || '',
+              compatibility: row.compatibility || '',
+              usageRights: row.usage_rights || '',
+              whatsIncluded: Array.isArray(row.whats_included) ? row.whats_included : [],
+              tags: Array.isArray(row.tags) ? row.tags : [],
+              featured: Boolean(row.featured),
+              bestseller: Boolean(row.bestseller),
+              new: Boolean(row.is_new),
+              limited: Boolean(row.limited),
+              seoTitle: row.seo_title,
+              seoDescription: row.seo_description,
+              isPublished: row.is_published !== false,
+              createdAt: row.created_at || new Date().toISOString(),
+              updatedAt: row.updated_at || new Date().toISOString(),
+            }))
+            .filter(
+              (p: StoredProduct) =>
+                !deletedProdSet.has((p.id || '').toLowerCase().trim()) &&
+                !deletedProdSet.has((p.slug || '').toLowerCase().trim())
+            );
+        }
+
+        if (!catErr && Array.isArray(supaCategories)) {
+          const deletedCatSet = new Set(
+            (localDb.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
+          );
+          localDb.categories = supaCategories
+            .map((row: any) => ({
+              id: row.id,
+              name: row.name,
+              slug: row.slug,
+              description: row.description || '',
+              image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
+              createdAt: row.created_at || new Date().toISOString(),
+            }))
+            .filter(
+              (c: any) =>
+                !deletedCatSet.has(c.id.toLowerCase().trim()) &&
+                !deletedCatSet.has(c.slug.toLowerCase().trim()) &&
+                !deletedCatSet.has(c.name.toLowerCase().trim())
+            );
+        }
+      } catch {
+        // Fall back to local DB if Supabase is unreachable
+      }
+    }
+
+    dbCache = localDb;
+    normalizeSchemaArrays(localDb);
+    return localDb;
+  })();
+
+  try {
+    return await syncInFlightPromise;
+  } finally {
+    syncInFlightPromise = null;
+  }
 }
 
 /**
@@ -717,6 +688,41 @@ export function loadDb(): DatabaseSchema {
 }
 
 /**
+ * Update in-memory cache and local JSON cache (skipped on Vercel serverless).
+ * Used after authoritative single-row Supabase mutations so we don't re-upsert all tables.
+ */
+export async function saveLocalCacheOnly(data: DatabaseSchema): Promise<DatabaseSchema> {
+  normalizeSchemaArrays(data);
+  dbCache = data;
+  lastSupabaseSyncAttempt = Date.now();
+
+  if (process.env.VERCEL) {
+    return data;
+  }
+
+  writeQueuePromise = writeQueuePromise
+    .then(async () => {
+      const serialized = JSON.stringify(data, null, 2);
+      try {
+        if (!fs.existsSync(DATA_DIR)) {
+          fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
+        const tempPath = `${DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+        fs.writeFileSync(tempPath, serialized, 'utf-8');
+        fs.renameSync(tempPath, DB_FILE);
+      } catch {
+        // Ignore local cache write error
+      }
+    })
+    .catch((err) => {
+      console.error('[DESIGNHUB DB] Local cache write error:', err);
+    });
+
+  await writeQueuePromise;
+  return data;
+}
+
+/**
  * Save database state atomically to disk with mutex serialization,
  * and asynchronously synchronize to Supabase tables.
  */
@@ -728,25 +734,26 @@ export async function saveDb(data: DatabaseSchema): Promise<DatabaseSchema> {
     .then(async () => {
       const serialized = JSON.stringify(data, null, 2);
 
-      // 1. Write to local storage
-      try {
-        if (!fs.existsSync(DATA_DIR)) {
-          fs.mkdirSync(DATA_DIR, { recursive: true });
-        }
-        const tempPath = `${DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
-        fs.writeFileSync(tempPath, serialized, 'utf-8');
-        fs.renameSync(tempPath, DB_FILE);
-      } catch {
-        // Fallback write to /tmp in serverless environment
+      // 1. Write to local storage (skip on Vercel where local JSON is ephemeral)
+      if (!process.env.VERCEL) {
         try {
-          if (!fs.existsSync(TMP_DATA_DIR)) {
-            fs.mkdirSync(TMP_DATA_DIR, { recursive: true });
+          if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
           }
-          const tmpTemp = `${TMP_DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
-          fs.writeFileSync(tmpTemp, serialized, 'utf-8');
-          fs.renameSync(tmpTemp, TMP_DB_FILE);
-        } catch (tmpErr) {
-          console.warn('[DESIGNHUB DB] Warning writing /tmp file:', tmpErr);
+          const tempPath = `${DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+          fs.writeFileSync(tempPath, serialized, 'utf-8');
+          fs.renameSync(tempPath, DB_FILE);
+        } catch {
+          try {
+            if (!fs.existsSync(TMP_DATA_DIR)) {
+              fs.mkdirSync(TMP_DATA_DIR, { recursive: true });
+            }
+            const tmpTemp = `${TMP_DB_FILE}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+            fs.writeFileSync(tmpTemp, serialized, 'utf-8');
+            fs.renameSync(tmpTemp, TMP_DB_FILE);
+          } catch (tmpErr) {
+            console.warn('[DESIGNHUB DB] Warning writing /tmp file:', tmpErr);
+          }
         }
       }
 

@@ -4,7 +4,16 @@ import fs from 'fs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
-import { ensureDbLoaded, loadDb, saveDb, isDatabaseConnected, getSupabaseServerClient, getCategoryFallbackImage } from './src/server/db';
+import {
+  ensureDbLoaded,
+  loadDb,
+  saveDb,
+  saveLocalCacheOnly,
+  formatSupabaseError,
+  isDatabaseConnected,
+  getSupabaseServerClient,
+  getCategoryFallbackImage,
+} from './src/server/db';
 import { storageService, isObjectStorageConfigured } from './src/server/storage';
 
 dotenv.config();
@@ -91,15 +100,6 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Middleware to ensure database state is synchronized (PostgreSQL or local file)
-app.use('/api', async (_req, _res, next) => {
-  try {
-    await ensureDbLoaded();
-  } catch (err) {
-    console.error('[DesignHub PK] Failed to ensure DB state:', err);
-  }
-  next();
-});
 
 // Universal image serving handler: Resolves images across all asset folders without intercepting Vite module requests
 const candidateImageDirs = [
@@ -831,8 +831,8 @@ app.get('/api/health', async (_req, res) => {
   });
 });
 
-app.get('/api/storefront', (_req, res) => {
-  const db = loadDb();
+app.get('/api/storefront', async (_req, res) => {
+  const db = await ensureDbLoaded();
   const deletedCatSet = new Set((db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim()));
   const activeCategories = (db.categories || []).filter(
     (c) =>
@@ -851,8 +851,8 @@ app.get('/api/storefront', (_req, res) => {
   });
 });
 
-app.get('/api/products/:slugOrId', (req, res) => {
-  const db = loadDb();
+app.get('/api/products/:slugOrId', async (req, res) => {
+  const db = await ensureDbLoaded();
   const { slugOrId } = req.params;
   const product = db.products.find((p) => p.slug === slugOrId || p.id === slugOrId);
   if (!product) {
@@ -2299,8 +2299,8 @@ app.put('/api/admin/email/confirm', requireAdmin, async (req, res) => {
   });
 });
 
-app.get('/api/admin/dashboard', requireAdmin, (_req, res) => {
-  const db = loadDb();
+app.get('/api/admin/dashboard', requireAdmin, async (_req, res) => {
+  const db = await ensureDbLoaded(true);
   const paidOrders = db.orders.filter((o) => o.paymentStatus === 'Paid' || o.paymentStatus === 'PAID');
   const revenue = paidOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
   const totalDownloadsCompleted = db.downloads.reduce((sum, d) => sum + d.downloadCount, 0);
@@ -2606,6 +2606,53 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
     updatedAt: now,
   };
 
+  const client = getSupabaseServerClient();
+  if (!client) {
+    res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+    return;
+  }
+
+  const { data: insertedProd, error: prodInsertErr } = await client
+    .from('products')
+    .insert({
+      id: product.id,
+      title: product.title,
+      slug: product.slug,
+      category: product.category,
+      description: product.description,
+      preview_images: product.previewImages,
+      jpg_storage_key: product.jpgStorageKey,
+      jpg_file_name: product.jpgFileName,
+      jpg_price: product.jpgPrice,
+      old_price: product.oldPrice,
+      has_psd: product.hasPsd,
+      psd_storage_key: product.psdStorageKey,
+      psd_file_name: product.psdFileName,
+      psd_upgrade_price: product.psdUpgradePrice,
+      dimensions: product.dimensions,
+      compatibility: product.compatibility,
+      usage_rights: product.usageRights,
+      whats_included: product.whatsIncluded,
+      tags: product.tags,
+      featured: product.featured,
+      bestseller: product.bestseller,
+      is_new: product.new,
+      limited: product.limited,
+      seo_title: product.seoTitle,
+      seo_description: product.seoDescription,
+      is_published: true,
+      created_at: product.createdAt,
+      updated_at: product.updatedAt,
+    })
+    .select()
+    .single();
+
+  if (prodInsertErr || !insertedProd) {
+    const status = prodInsertErr?.code === '42501' ? 403 : prodInsertErr?.code === '23505' ? 409 : 500;
+    res.status(status).json({ error: formatSupabaseError(prodInsertErr, 'product') });
+    return;
+  }
+
   // If newly created product has an id/slug previously tombstoned, clear it
   if (Array.isArray(db.deletedProductIds)) {
     db.deletedProductIds = db.deletedProductIds.filter(
@@ -2614,8 +2661,8 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
   }
 
   db.products.unshift(product);
-  await saveDb(db);
-  console.info(`[DesignHub PK Product] Successfully created product "${product.title}" (${product.id})`);
+  await saveLocalCacheOnly(db);
+  console.info(`[DesignHub PK Product] Successfully created product "${product.title}" (${product.id}) in Supabase.`);
   res.status(201).json({ product: sanitizeProductForPublic(product) });
 });
 
@@ -2751,6 +2798,52 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
 
   product.updatedAt = new Date().toISOString();
 
+  const client = getSupabaseServerClient();
+  if (!client) {
+    res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+    return;
+  }
+
+  const { data: updatedProd, error: prodUpdateErr } = await client
+    .from('products')
+    .update({
+      title: product.title,
+      slug: product.slug,
+      category: product.category,
+      description: product.description,
+      preview_images: product.previewImages,
+      jpg_storage_key: product.jpgStorageKey,
+      jpg_file_name: product.jpgFileName,
+      jpg_price: product.jpgPrice,
+      old_price: product.oldPrice,
+      has_psd: product.hasPsd,
+      psd_storage_key: product.psdStorageKey,
+      psd_file_name: product.psdFileName,
+      psd_upgrade_price: product.psdUpgradePrice,
+      dimensions: product.dimensions,
+      compatibility: product.compatibility,
+      usage_rights: product.usageRights,
+      whats_included: product.whatsIncluded,
+      tags: product.tags,
+      featured: product.featured,
+      bestseller: product.bestseller,
+      is_new: product.new,
+      limited: product.limited,
+      seo_title: product.seoTitle,
+      seo_description: product.seoDescription,
+      is_published: true,
+      updated_at: product.updatedAt,
+    })
+    .eq('id', product.id)
+    .select()
+    .single();
+
+  if (prodUpdateErr || !updatedProd) {
+    const status = prodUpdateErr?.code === '42501' ? 403 : prodUpdateErr?.code === '23505' ? 409 : 500;
+    res.status(status).json({ error: formatSupabaseError(prodUpdateErr, 'product') });
+    return;
+  }
+
   // Clear from tombstone if re-activated
   if (Array.isArray(db.deletedProductIds)) {
     db.deletedProductIds = db.deletedProductIds.filter(
@@ -2758,15 +2851,14 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
     );
   }
 
-  await saveDb(db);
+  await saveLocalCacheOnly(db);
   res.json({ product: sanitizeProductForPublic(product) });
 });
 
 // Admin: Delete Product
 app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
   try {
-    await ensureDbLoaded();
-    const db = loadDb();
+    const db = await ensureDbLoaded();
     const { id } = req.params;
     const idx = db.products.findIndex((p) => p.id === id || p.slug === id);
     if (idx === -1) {
@@ -2775,7 +2867,20 @@ app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
     }
     const product = db.products[idx];
 
-    // 1. Register permanent tombstone so product never resurrects
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+      return;
+    }
+
+    const { error: delProdErr } = await client.from('products').delete().eq('id', product.id);
+    if (delProdErr) {
+      const status = delProdErr.code === '42501' ? 403 : 500;
+      res.status(status).json({ error: formatSupabaseError(delProdErr, 'product') });
+      return;
+    }
+
+    // Register permanent tombstone & remove from active product list
     if (!Array.isArray(db.deletedProductIds)) {
       db.deletedProductIds = [];
     }
@@ -2786,139 +2891,334 @@ app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
       db.deletedProductIds.push(product.slug);
     }
 
-    // 2. Remove from active product list
     db.products.splice(idx, 1);
-    await saveDb(db);
+    await saveLocalCacheOnly(db);
 
-    // 3. Attempt remote Supabase deletion
-    const client = getSupabaseServerClient();
-    if (client) {
-      try {
-        await client.from('products').delete().eq('id', product.id);
-        if (product.slug) {
-          await client.from('products').delete().eq('slug', product.slug);
-        }
-      } catch (err) {
-        console.warn('[DesignHub PK Product Delete] Notice:', err);
-      }
-    }
-
-    console.info(`[DesignHub PK Product] Product "${product.title}" (${product.id}) permanently deleted.`);
+    console.info(`[DesignHub PK Product] Product "${product.title}" (${product.id}) permanently deleted from Supabase.`);
     res.json({ success: true, deleted: true, productId: product.id });
   } catch (err: any) {
     res.status(500).json({ error: `Failed to delete product: ${err?.message || 'Unknown error'}` });
   }
 });
 
-// Admin: Categories CRUD
-app.post('/api/admin/categories', requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const { name, description, image } = req.body as {
-    name?: string;
-    description?: string;
-    image?: string;
-  };
-  if (!name?.trim()) {
-    res.status(400).json({ error: 'Category name is required.' });
-    return;
-  }
-  const slug = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
+// Admin: Categories CRUD (Supabase PostgreSQL Primary Source of Truth)
+app.get('/api/admin/categories', requireAdmin, async (_req, res) => {
+  try {
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+      return;
+    }
+    const { data: rows, error } = await client
+      .from('categories')
+      .select('*')
+      .order('created_at', { ascending: true });
 
-  const newCat = {
-    id: `cat_${crypto.randomBytes(4).toString('hex')}`,
-    name: name.trim(),
-    slug,
-    description: description?.trim() || '',
-    image: image?.trim() || getCategoryFallbackImage(slug, name.trim()),
-    createdAt: new Date().toISOString(),
-  };
+    if (error) {
+      res.status(500).json({ error: formatSupabaseError(error, 'category') });
+      return;
+    }
 
-  // Remove from deleted tombstone so admin can freely recreate this category
-  if (Array.isArray(db.deletedCategoryIds)) {
-    db.deletedCategoryIds = db.deletedCategoryIds.filter(
-      (dId) => dId !== newCat.id && dId !== newCat.slug && dId !== slug
+    const db = loadDb();
+    const deletedCatSet = new Set(
+      (db.deletedCategoryIds || []).map((x) => x.toLowerCase().trim())
     );
-  }
+    const categories = (rows || [])
+      .map((row: any) => ({
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        description: row.description || '',
+        image: row.image?.trim() || getCategoryFallbackImage(row.slug, row.name),
+        createdAt: row.created_at || new Date().toISOString(),
+      }))
+      .filter(
+        (c: any) =>
+          !deletedCatSet.has(c.id.toLowerCase().trim()) &&
+          !deletedCatSet.has(c.slug.toLowerCase().trim()) &&
+          !deletedCatSet.has(c.name.toLowerCase().trim())
+      );
 
-  db.categories.push(newCat);
-  await saveDb(db);
-  res.status(201).json({ category: newCat });
+    db.categories = categories;
+    await saveLocalCacheOnly(db);
+    res.json({ categories });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to fetch categories: ${err?.message || 'Unknown error'}` });
+  }
 });
 
-app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
-  const db = loadDb();
-  const cat = db.categories.find((c) => c.id === req.params.id);
-  if (!cat) {
-    res.status(404).json({ error: 'Category not found.' });
-    return;
-  }
-  const { name, description, image } = req.body;
-  if (name?.trim()) {
-    cat.name = name.trim();
-    cat.slug = name
-      .trim()
+app.post('/api/admin/categories', requireAdmin, async (req, res) => {
+  try {
+    const { name, description, image } = req.body as {
+      name?: string;
+      description?: string;
+      image?: string;
+    };
+    const cleanName = name?.trim() || '';
+    if (!cleanName) {
+      res.status(400).json({ error: 'Category name is required.' });
+      return;
+    }
+
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+      return;
+    }
+
+    let slug = cleanName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
-  }
-  if (description !== undefined) cat.description = description.trim();
-  if (image?.trim()) {
-    cat.image = image.trim();
-  } else if (!cat.image) {
-    cat.image = getCategoryFallbackImage(cat.slug, cat.name);
-  }
+    if (!slug) {
+      slug = `cat-${crypto.randomBytes(3).toString('hex')}`;
+    }
 
-  // Clear from tombstone
-  if (Array.isArray(db.deletedCategoryIds)) {
-    db.deletedCategoryIds = db.deletedCategoryIds.filter(
-      (dId) => dId !== cat.id && dId !== cat.slug
+    // Check Supabase for existing category with same name or slug to prevent duplicates
+    const { data: existingCats, error: checkErr } = await client
+      .from('categories')
+      .select('id, name, slug');
+
+    if (checkErr) {
+      res.status(500).json({ error: formatSupabaseError(checkErr, 'category') });
+      return;
+    }
+
+    const duplicate = (existingCats || []).find(
+      (c: any) =>
+        (c.name || '').trim().toLowerCase() === cleanName.toLowerCase() ||
+        (c.slug || '').trim().toLowerCase() === slug.toLowerCase()
     );
-  }
+    if (duplicate) {
+      res.status(409).json({ error: `Category "${duplicate.name}" already exists.` });
+      return;
+    }
 
-  await saveDb(db);
-  res.json({ category: cat });
+    const newId = `cat_${crypto.randomBytes(4).toString('hex')}`;
+    const createdAt = new Date().toISOString();
+    const finalImage = image?.trim() || getCategoryFallbackImage(slug, cleanName);
+
+    const { data: insertedRow, error: insertErr } = await client
+      .from('categories')
+      .insert({
+        id: newId,
+        name: cleanName,
+        slug,
+        description: description?.trim() || '',
+        image: finalImage,
+        created_at: createdAt,
+      })
+      .select()
+      .single();
+
+    if (insertErr || !insertedRow) {
+      const status = insertErr?.code === '42501' ? 403 : insertErr?.code === '23505' ? 409 : 500;
+      res.status(status).json({ error: formatSupabaseError(insertErr, 'category') });
+      return;
+    }
+
+    const savedCat = {
+      id: insertedRow.id,
+      name: insertedRow.name,
+      slug: insertedRow.slug,
+      description: insertedRow.description || '',
+      image: insertedRow.image?.trim() || getCategoryFallbackImage(insertedRow.slug, insertedRow.name),
+      createdAt: insertedRow.created_at || createdAt,
+    };
+
+    const db = loadDb();
+    if (Array.isArray(db.deletedCategoryIds)) {
+      db.deletedCategoryIds = db.deletedCategoryIds.filter(
+        (dId) =>
+          dId.toLowerCase() !== savedCat.id.toLowerCase() &&
+          dId.toLowerCase() !== savedCat.slug.toLowerCase() &&
+          dId.toLowerCase() !== savedCat.name.toLowerCase()
+      );
+    }
+    if (!db.categories.some((c) => c.id === savedCat.id)) {
+      db.categories.push(savedCat);
+    }
+    await saveLocalCacheOnly(db);
+
+    res.status(201).json({ category: savedCat });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to create category: ${err?.message || 'Unknown error'}` });
+  }
+});
+
+app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
+  try {
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+      return;
+    }
+
+    const { id } = req.params;
+    const { data: existing, error: fetchErr } = await client
+      .from('categories')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (fetchErr) {
+      res.status(500).json({ error: formatSupabaseError(fetchErr, 'category') });
+      return;
+    }
+    if (!existing) {
+      res.status(404).json({ error: 'Category not found.' });
+      return;
+    }
+
+    const { name, description, image } = req.body as {
+      name?: string;
+      description?: string;
+      image?: string;
+    };
+
+    const nextName = name?.trim() ? name.trim() : existing.name;
+    let nextSlug = name?.trim()
+      ? name
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')
+      : existing.slug;
+    if (!nextSlug) {
+      nextSlug = existing.slug || `cat-${crypto.randomBytes(3).toString('hex')}`;
+    }
+
+    // Check for duplicate name/slug with other categories
+    const { data: allCats, error: listErr } = await client
+      .from('categories')
+      .select('id, name, slug');
+    if (listErr) {
+      res.status(500).json({ error: formatSupabaseError(listErr, 'category') });
+      return;
+    }
+    const duplicate = (allCats || []).find(
+      (c: any) =>
+        c.id !== existing.id &&
+        ((c.name || '').trim().toLowerCase() === nextName.toLowerCase() ||
+          (c.slug || '').trim().toLowerCase() === nextSlug.toLowerCase())
+    );
+    if (duplicate) {
+      res.status(409).json({ error: `Category "${duplicate.name}" already exists.` });
+      return;
+    }
+
+    const nextDescription = description !== undefined ? description.trim() : existing.description || '';
+    const nextImage = image?.trim()
+      ? image.trim()
+      : existing.image?.trim() || getCategoryFallbackImage(nextSlug, nextName);
+
+    const { data: updatedRow, error: updateErr } = await client
+      .from('categories')
+      .update({
+        name: nextName,
+        slug: nextSlug,
+        description: nextDescription,
+        image: nextImage,
+      })
+      .eq('id', existing.id)
+      .select()
+      .single();
+
+    if (updateErr || !updatedRow) {
+      const status = updateErr?.code === '42501' ? 403 : updateErr?.code === '23505' ? 409 : 500;
+      res.status(status).json({ error: formatSupabaseError(updateErr, 'category') });
+      return;
+    }
+
+    const updatedCat = {
+      id: updatedRow.id,
+      name: updatedRow.name,
+      slug: updatedRow.slug,
+      description: updatedRow.description || '',
+      image: updatedRow.image?.trim() || getCategoryFallbackImage(updatedRow.slug, updatedRow.name),
+      createdAt: updatedRow.created_at || existing.created_at || new Date().toISOString(),
+    };
+
+    const db = loadDb();
+    const idx = db.categories.findIndex((c) => c.id === updatedCat.id);
+    if (idx >= 0) {
+      db.categories[idx] = updatedCat;
+    } else {
+      db.categories.push(updatedCat);
+    }
+    await saveLocalCacheOnly(db);
+
+    res.json({ category: updatedCat });
+  } catch (err: any) {
+    res.status(500).json({ error: `Failed to update category: ${err?.message || 'Unknown error'}` });
+  }
 });
 
 app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
   try {
-    await ensureDbLoaded();
-    const db = loadDb();
+    const client = getSupabaseServerClient();
+    if (!client) {
+      res.status(500).json({ error: 'Supabase client is not configured on the server.' });
+      return;
+    }
+
     const rawId = req.params.id;
     const cleanId = decodeURIComponent(rawId).trim().toLowerCase();
 
-    const cat = db.categories.find(
-      (c) =>
-        c.id.toLowerCase() === cleanId ||
-        c.slug.toLowerCase() === cleanId ||
-        c.name.toLowerCase() === cleanId ||
+    const { data: allCats, error: fetchErr } = await client
+      .from('categories')
+      .select('*');
+
+    if (fetchErr) {
+      res.status(500).json({ error: formatSupabaseError(fetchErr, 'category') });
+      return;
+    }
+
+    const cat = (allCats || []).find(
+      (c: any) =>
+        (c.id || '').toLowerCase() === cleanId ||
+        (c.slug || '').toLowerCase() === cleanId ||
+        (c.name || '').toLowerCase() === cleanId ||
         c.id === rawId ||
         c.slug === rawId
     );
 
+    const db = loadDb();
+
     if (!cat) {
-      // If already deleted or not found, still ensure cleanId is tombstoned to prevent resurrection
       if (!Array.isArray(db.deletedCategoryIds)) db.deletedCategoryIds = [];
       if (!db.deletedCategoryIds.includes(cleanId)) db.deletedCategoryIds.push(cleanId);
-      await saveDb(db);
+      db.categories = db.categories.filter(
+        (c) =>
+          c.id.toLowerCase() !== cleanId &&
+          c.slug.toLowerCase() !== cleanId &&
+          c.name.toLowerCase() !== cleanId
+      );
+      await saveLocalCacheOnly(db);
       res.json({ success: true, deleted: true, categoryId: rawId, message: 'Category already deleted.' });
       return;
     }
 
-    // Safety check: Are there any associated products?
-    const associatedProducts = db.products.filter(
-      (p) =>
-        (p.category && p.category.toLowerCase() === cat.name.toLowerCase()) ||
-        (p.category && p.category.toLowerCase() === cat.slug.toLowerCase()) ||
+    // Safety check: Are there any associated products in Supabase?
+    const { data: supaProducts, error: prodErr } = await client
+      .from('products')
+      .select('id, title, category');
+
+    if (prodErr) {
+      res.status(500).json({ error: formatSupabaseError(prodErr, 'product') });
+      return;
+    }
+
+    const associatedProducts = (supaProducts || []).filter(
+      (p: any) =>
+        (p.category && p.category.toLowerCase() === (cat.name || '').toLowerCase()) ||
+        (p.category && p.category.toLowerCase() === (cat.slug || '').toLowerCase()) ||
         p.category === cat.id
     );
 
     if (associatedProducts.length > 0) {
       const productTitles = associatedProducts
-        .map((p) => `"${p.title}"`)
+        .map((p: any) => `"${p.title}"`)
         .slice(0, 3)
         .join(', ');
       const moreCount = associatedProducts.length > 3 ? ` and ${associatedProducts.length - 3} more` : '';
@@ -2929,7 +3229,18 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
       return;
     }
 
-    // 1. Permanently register tombstone so Supabase sync, seed scripts, or restart never resurrects it
+    // Authoritative Supabase deletion
+    const { error: delErr } = await client
+      .from('categories')
+      .delete()
+      .eq('id', cat.id);
+
+    if (delErr) {
+      const status = delErr.code === '42501' ? 403 : 500;
+      res.status(status).json({ error: formatSupabaseError(delErr, 'category') });
+      return;
+    }
+
     if (!Array.isArray(db.deletedCategoryIds)) {
       db.deletedCategoryIds = [];
     }
@@ -2944,33 +3255,18 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
       }
     }
 
-    // 2. Remove all matching entries from local in-memory database
     db.categories = db.categories.filter(
       (c) =>
         c.id !== cat.id &&
         c.slug !== cat.slug &&
-        c.name.toLowerCase() !== cat.name.toLowerCase() &&
+        c.name.toLowerCase() !== (cat.name || '').toLowerCase() &&
         c.id.toLowerCase() !== cleanId &&
         c.slug.toLowerCase() !== cleanId
     );
 
-    // 3. Persist immediately to database file
-    await saveDb(db);
+    await saveLocalCacheOnly(db);
 
-    // 4. Authoritative Supabase deletion attempt
-    const client = getSupabaseServerClient();
-    if (client) {
-      try {
-        await client.from('categories').delete().eq('id', cat.id);
-        if (cat.slug) {
-          await client.from('categories').delete().eq('slug', cat.slug);
-        }
-      } catch (supaErr) {
-        console.warn('[DesignHub PK Category] Supabase delete notice (tombstone will enforce deletion):', supaErr);
-      }
-    }
-
-    console.info(`[DesignHub PK Category] Category "${cat.name}" (${cat.id}) permanently deleted.`);
+    console.info(`[DesignHub PK Category] Category "${cat.name}" (${cat.id}) permanently deleted from Supabase.`);
     res.json({ success: true, deleted: true, categoryId: cat.id });
   } catch (err: any) {
     console.error('[DesignHub PK Category Delete Exception]:', err);

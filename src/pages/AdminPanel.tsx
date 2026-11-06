@@ -29,6 +29,7 @@ import {
   Eye,
   EyeOff,
   X,
+  Loader2,
 } from 'lucide-react';
 import {
   Product,
@@ -272,6 +273,8 @@ export function AdminPanel({
   const [catDescription, setCatDescription] = useState('');
   const [catImage, setCatImage] = useState('');
   const [catImageName, setCatImageName] = useState('');
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
 
   const fetchAdminDashboard = useCallback(
     async (isSilent = false) => {
@@ -292,22 +295,7 @@ export function AdminPanel({
           }
           setStats(data.stats);
           setProducts(data.products || []);
-          const deletedLocal: string[] = (() => {
-            try {
-              return JSON.parse(localStorage.getItem('velora_deleted_categories') || '[]');
-            } catch {
-              return [];
-            }
-          })();
-          const filteredCategories = (data.categories || []).filter((c: any) => {
-            const idLower = (c.id || '').toLowerCase();
-            const slugLower = (c.slug || '').toLowerCase();
-            const nameLower = (c.name || '').toLowerCase();
-            return !deletedLocal.some(
-              (d) => d.toLowerCase() === idLower || d.toLowerCase() === slugLower || d.toLowerCase() === nameLower
-            );
-          });
-          setCategories(filteredCategories);
+          setCategories(data.categories || []);
           setOrders(data.orders || []);
           if (data.homepageConfig) {
             setHomepageConfig(data.homepageConfig);
@@ -327,12 +315,29 @@ export function AdminPanel({
     [adminToken, onNotify]
   );
 
+  const fetchAdminCategories = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const res = await fetch(getApiUrl('/api/admin/categories'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.categories)) {
+          setCategories(data.categories);
+        }
+      }
+    } catch {
+      // ignore background category sync error
+    }
+  }, [adminToken]);
+
   useEffect(() => {
     if (adminToken) {
       fetchAdminDashboard(false);
       const interval = setInterval(() => {
         fetchAdminDashboard(true);
-      }, 4000);
+      }, 30000);
       return () => clearInterval(interval);
     } else {
       setEmailInput('');
@@ -849,10 +854,12 @@ export function AdminPanel({
 
   const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingCategory) return;
     if (!catName.trim()) {
       onNotify('Please enter a category name.');
       return;
     }
+    setSavingCategory(true);
     try {
       const url = editingCategoryId
         ? getApiUrl(`/api/admin/categories/${editingCategoryId}`)
@@ -871,28 +878,38 @@ export function AdminPanel({
           image: catImage || DEFAULT_CATEGORY_IMAGE,
         }),
       });
-      if (res.ok) {
-        // Clear from local tombstones if recreated
-        try {
-          const currentDeleted: string[] = JSON.parse(
-            localStorage.getItem('velora_deleted_categories') || '[]'
-          );
-          const nameLower = catName.trim().toLowerCase();
-          const updated = currentDeleted.filter((d) => d.toLowerCase() !== nameLower);
-          localStorage.setItem('velora_deleted_categories', JSON.stringify(updated));
-        } catch {}
-
-        onNotify(editingCategoryId ? 'Category updated.' : 'Category created.');
-        resetCategoryForm();
-        await fetchAdminDashboard();
-        await onStorefrontUpdated();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        onNotify(data.error || `Failed to save category (HTTP ${res.status}).`);
+        return;
       }
-    } catch {
-      onNotify('Error saving category.');
+
+      if (data.category) {
+        if (editingCategoryId) {
+          setCategories((prev) =>
+            prev.map((c) => (c.id === editingCategoryId ? data.category : c))
+          );
+        } else {
+          setCategories((prev) =>
+            prev.some((c) => c.id === data.category.id) ? prev : [...prev, data.category]
+          );
+        }
+      }
+
+      onNotify(editingCategoryId ? 'Category updated.' : 'Category created.');
+      resetCategoryForm();
+      void fetchAdminCategories();
+      void onStorefrontUpdated();
+    } catch (err: any) {
+      onNotify(`Error saving category: ${err?.message || 'Network error'}`);
+    } finally {
+      setSavingCategory(false);
     }
   };
 
   const handleDeleteCategory = async (id: string) => {
+    if (deletingCategoryId === id) return;
+    setDeletingCategoryId(id);
     try {
       const catToDelete = categories.find(
         (c) => c.id === id || c.slug === id || c.name.toLowerCase() === id.toLowerCase()
@@ -904,25 +921,6 @@ export function AdminPanel({
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         onNotify('Category permanently deleted.');
-
-        // Record permanent tombstone in browser storage
-        try {
-          const currentDeleted: string[] = JSON.parse(
-            localStorage.getItem('velora_deleted_categories') || '[]'
-          );
-          const toAdd = [
-            id,
-            catToDelete?.id,
-            catToDelete?.slug,
-            catToDelete?.name,
-          ].filter(Boolean) as string[];
-          for (const item of toAdd) {
-            if (!currentDeleted.includes(item)) currentDeleted.push(item);
-            if (!currentDeleted.includes(item.toLowerCase())) currentDeleted.push(item.toLowerCase());
-          }
-          localStorage.setItem('velora_deleted_categories', JSON.stringify(currentDeleted));
-        } catch {}
-
         setCategories((prev) =>
           prev.filter(
             (c) =>
@@ -935,13 +933,15 @@ export function AdminPanel({
                   c.name.toLowerCase() !== catToDelete.name.toLowerCase()))
           )
         );
-        await fetchAdminDashboard();
-        await onStorefrontUpdated();
+        void fetchAdminCategories();
+        void onStorefrontUpdated();
       } else {
         onNotify(data.error || 'Could not delete category.');
       }
     } catch (err: any) {
       onNotify(`Could not delete category: ${err?.message || 'Network error'}`);
+    } finally {
+      setDeletingCategoryId(null);
     }
   };
 
@@ -2542,15 +2542,24 @@ export function AdminPanel({
             <div className="flex items-center gap-2.5 pt-1">
               <button
                 type="submit"
-                className="btn-velora-primary flex-1 py-3 bg-[#3D0F18] text-[#FAF6F3] text-xs font-semibold uppercase tracking-[0.14em] rounded-xs"
+                disabled={savingCategory}
+                className="btn-velora-primary flex-1 py-3 bg-[#3D0F18] text-[#FAF6F3] text-xs font-semibold uppercase tracking-[0.14em] rounded-xs inline-flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {editingCategoryId ? 'Update Category' : 'Add Category'}
+                {savingCategory && <Loader2 className="w-4 h-4 animate-spin" />}
+                {savingCategory
+                  ? editingCategoryId
+                    ? 'Updating...'
+                    : 'Creating...'
+                  : editingCategoryId
+                  ? 'Update Category'
+                  : 'Add Category'}
               </button>
               {editingCategoryId && (
                 <button
                   type="button"
+                  disabled={savingCategory}
                   onClick={resetCategoryForm}
-                  className="px-4 py-3 bg-[#F3EAE4] hover:bg-[#E6DAD2] text-[#231518] text-xs font-semibold uppercase tracking-[0.14em] rounded-xs"
+                  className="px-4 py-3 bg-[#F3EAE4] hover:bg-[#E6DAD2] text-[#231518] text-xs font-semibold uppercase tracking-[0.14em] rounded-xs disabled:opacity-60"
                 >
                   Cancel
                 </button>
@@ -2588,11 +2597,16 @@ export function AdminPanel({
                   </button>
                   <button
                     type="button"
+                    disabled={deletingCategoryId === cat.id}
                     onClick={() => handleDeleteCategory(cat.id)}
-                    className="p-2 text-[#6E5A5D] hover:text-red-700"
+                    className="p-2 text-[#6E5A5D] hover:text-red-700 disabled:opacity-50"
                     title="Delete category"
                   >
-                    <Trash2 className="w-4 h-4" />
+                    {deletingCategoryId === cat.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-4 h-4" />
+                    )}
                   </button>
                 </div>
               </div>
